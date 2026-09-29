@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "decision_id": "ff77bdb0-70af-4f2a-a913-76609b66761b",
+  "issuer": "behavior-engine",
+  "household_id": "pilot-home",
+  "central_unit_id": "ad19a578-21e2-453f-a57c-1913350be34e",
+  "subject_id": "64582f6b-38a5-48dd-9ed4-ae02949c7740",
+  "device_id": "ha:light.living",
+  "capability_id": "power",
+  "requested_value": true,
+  "operation": "apply",
+  "valid_from": "2026-09-29T18:00:00Z",
+  "expires_at": "2026-09-29T19:00:00Z",
+  "reason_code": "goal_verified",
+  "idempotency_key": "behavior:ff77bdb0-70af-4f2a-a913-76609b66761b",
+  "required_confirmation": "device"
+}
