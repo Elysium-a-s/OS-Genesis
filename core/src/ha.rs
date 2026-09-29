@@ -180,10 +180,8 @@ async fn run_session(config: &HaConfig, inventory: &Inventory) -> Result<(), HaE
             for event in &buffered_events {
                 inventory.apply_event(event).await;
             }
-            tracing::info!(
-                count = inventory.devices().await.len(),
-                "Home Assistant inventory loaded"
-            );
+            let count = inventory.devices().await.len();
+            tracing::info!(count, "Home Assistant inventory loaded");
             break;
         } else {
             return Err(HaError::Protocol);
