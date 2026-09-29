@@ -2,7 +2,7 @@
 
 `ha-app/genesis/` obsahuje konfiguráciu a Dockerfile pre Home Assistant Green (`aarch64`). Obraz obsahuje predkompilovaný Rust core; na Green sa Rust ani Cargo neinštalujú. CI vytvára ARM64 image archive a skúša štart, health endpoint, chránený inventár, reštart a perzistenciu SQLite v emulovanom ARM64 kontajneri.
 
-Home Assistant app používa `homeassistant_api: true` a interný WebSocket proxy `ws://supervisor/core/websocket`. Supervisor poskytne `SUPERVISOR_TOKEN` v prostredí; štartovací skript ho odovzdá core ako `GENESIS_HA_TOKEN`. Tento token sa neukladá do Gitu ani do možností app. Jediné používateľské tajomstvo v možnostiach je samostatný `read_token` (najmenej 32 znakov) pre read-only Genesis API. SQLite sa ukladá do perzistentného `/data/genesis-ledger.sqlite3`.
+Home Assistant app používa `homeassistant_api: true` a interný WebSocket proxy `ws://supervisor/core/websocket`. Supervisor poskytne `SUPERVISOR_TOKEN` v prostredí; štartovací skript ho odovzdá core ako `GENESIS_HA_TOKEN`. Tento token sa neukladá do Gitu ani do možností app. Používateľ nastaví samostatné `read_token` a `write_token` (každý najmenej 32 znakov). Write token povoľuje pilotné povely a nesmie byť vystavený verejnému internetu. SQLite sa ukladá do perzistentného `/data/genesis-ledger.sqlite3`.
 
 ## Stav distribúcie
 
@@ -13,7 +13,7 @@ Obraz je testovaný len v GitHub CI emulácii. Reálny Home Assistant Green, obn
 ## Po publikovaní obrazu
 
 1. V Home Assistant app obchode pridať URL repozitára `https://github.com/Elysium-a-s/OS-Genesis` (musí byť pre Supervisor dostupný).
-2. Nainštalovať **OS Genesis Pilot** a v nastaveniach vložiť vlastný náhodný `read_token` s aspoň 32 znakmi.
+2. Nainštalovať **OS Genesis Pilot** a v nastaveniach vložiť dva rôzne náhodné tokeny `read_token` a `write_token`, každý s aspoň 32 znakmi.
 3. Spustiť app a otvoriť Health odkaz. V logoch skontrolovať `Home Assistant inventory loaded` po pripojení aspoň jedného svetla/zásuvky.
 4. Reštartovať HA Green a overiť automatický štart, zachovanie databázy a aktuálny inventár.
 5. Zaznamenať CPU/RAM a logy pred reštartom a po ňom; tajomstvá z logov nezdieľať.

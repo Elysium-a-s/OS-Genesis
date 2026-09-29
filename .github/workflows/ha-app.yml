@@ -34,7 +34,7 @@ jobs:
           set -euo pipefail
           test "$(docker image inspect genesis-ha-pilot:ci --format '{{.Architecture}}')" = arm64
           mkdir -p "$RUNNER_TEMP/genesis-data"
-          printf '%s\n' '{"read_token":"abcdefghijklmnopqrstuvwxyz012345"}' > "$RUNNER_TEMP/genesis-data/options.json"
+          printf '%s\n' '{"read_token":"abcdefghijklmnopqrstuvwxyz012345","write_token":"ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"}' > "$RUNNER_TEMP/genesis-data/options.json"
           chmod 600 "$RUNNER_TEMP/genesis-data/options.json"
           container="$(docker run --platform linux/arm64 -d -e SUPERVISOR_TOKEN=ci-placeholder -v "$RUNNER_TEMP/genesis-data:/data" -p 127.0.0.1:18765:8080 genesis-ha-pilot:ci)"
           trap 'docker logs "$container"; docker rm -f "$container" >/dev/null' EXIT

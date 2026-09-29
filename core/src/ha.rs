@@ -86,6 +86,7 @@ pub struct Device {
     pub availability: Availability,
 }
 
+#[derive(Clone)]
 pub struct HaConfig {
     pub websocket_url: String,
     pub token: String,
