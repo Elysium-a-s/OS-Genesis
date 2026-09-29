@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "household_id": "home:demo",
+  "kind": "capability",
+  "device_id": "device:living-light",
+  "capability_id": "power",
+  "capability_type": "switch",
+  "readable": true,
+  "writable": true,
+  "value_type": "boolean"
+}

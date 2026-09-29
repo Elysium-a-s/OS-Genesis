@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "household_id": "home:demo",
+  "kind": "command",
+  "command_id": "cmd:pilot-002",
+  "device_id": "device:living-light",
+  "capability_id": "power",
+  "operation": "set",
+  "value": false,
+  "actor": {
+    "actor_type": "user",
+    "actor_id": "user:alice"
+  },
+  "idempotency_key": "idem:pilot-002",
+  "correlation_id": "corr:pilot-002",
+  "requested_at": "2026-09-29T10:05:00Z",
+  "status_changed_at": "2026-09-29T10:05:10Z",
+  "status": "unknown",
+  "confirmation_level": "none",
+  "reason": "Timeout waiting for Home Assistant response"
+}

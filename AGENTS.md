@@ -1,6 +1,6 @@
 # OS Genesis — agent instructions
 
-Genesis je v štádiu úvodnej dokumentačnej kostry. Adresáre `core/`, `adapters/`, `panel/`, `ha-app/`, `contracts/`, `docs/` a `tests/` zatiaľ obsahujú len README; funkčný runtime a build systém ešte neexistujú.
+Genesis má verziovaný kontrakt v `contracts/` a dokumentačné kostry ostatných modulov. Funkčný runtime a build systém core/panelu/HA app zatiaľ neexistujú.
 
 ## Working method
 - Search filenames/symbols first; read targeted ranges.
@@ -24,7 +24,7 @@ Genesis je v štádiu úvodnej dokumentačnej kostry. Adresáre `core/`, `adapte
 
 ## Repository rules
 - Inspect the current tree before choosing implementation conventions.
-- No runtime, build system or repeatable technical workflow is established yet.
+- No runtime or build system for core/panel/HA app is established yet. The v1 contract has a repeatable JSON Schema validation workflow documented in `contracts/README.md`.
 - Do not infer a platform or copy backend/mobile deployment assumptions here.
 - Treat the architecture and languages in README as a starting proposal until validated on pilot hardware.
 

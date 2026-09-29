@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "household_id": "home:demo",
+  "kind": "observation",
+  "device_id": "device:living-light",
+  "capability_id": "power",
+  "value": true,
+  "observed_at": "2026-09-29T10:00:01Z",
+  "received_at": "2026-09-29T10:00:02Z",
+  "quality": "fresh",
+  "source": "home_assistant",
+  "correlation_id": "corr:pilot-001"
+}

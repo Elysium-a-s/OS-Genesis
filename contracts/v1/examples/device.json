@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "household_id": "home:demo",
+  "kind": "device",
+  "device_id": "device:living-light",
+  "name": "Obývačka",
+  "room_id": "room:living",
+  "provider": "home_assistant",
+  "provider_device_ref": "light.living_room",
+  "availability": "online"
+}
