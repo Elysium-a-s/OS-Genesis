@@ -415,6 +415,7 @@
         "status": {
           "enum": [
             "created",
+            "accepted",
             "authorized",
             "queued",
             "sent",
@@ -531,6 +532,7 @@
               "status": {
                 "enum": [
                   "created",
+                  "accepted",
                   "authorized",
                   "queued",
                   "sent",

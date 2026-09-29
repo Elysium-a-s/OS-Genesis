@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "kind": "command",
+  "household_id": "home:demo",
+  "command_id": "cmd:pilot-000",
+  "device_id": "device:living-light",
+  "capability_id": "power",
+  "operation": "set",
+  "value": true,
+  "actor": {
+    "actor_type": "user",
+    "actor_id": "user:alice"
+  },
+  "idempotency_key": "idem:pilot-000",
+  "correlation_id": "corr:pilot-000",
+  "requested_at": "2026-09-29T10:00:00Z",
+  "status_changed_at": "2026-09-29T10:00:00Z",
+  "status": "accepted",
+  "confirmation_level": "none"
+}

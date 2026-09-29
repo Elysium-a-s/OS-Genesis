@@ -26,10 +26,16 @@ class GenesisV1ContractTests(unittest.TestCase):
 
     def test_all_examples_validate(self):
         files = sorted(EXAMPLES.glob("*.json"))
-        self.assertEqual(len(files), 7)
+        self.assertEqual(len(files), 8)
         for path in files:
             with self.subTest(example=path.name):
                 self.validator.validate(json.loads(path.read_text(encoding="utf-8")))
+
+    def test_accepted_is_not_confirmed(self):
+        accepted = self.sample("command-accepted.json")
+        self.validator.validate(accepted)
+        accepted["confirmation_level"] = "device"
+        self.assert_invalid(accepted)
 
     def test_command_requires_identity_and_idempotency(self):
         command = self.sample("command-unknown.json")

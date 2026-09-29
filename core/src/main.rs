@@ -1,20 +1,27 @@
-use std::{env, net::SocketAddr};
+use std::{env, net::SocketAddr, path::PathBuf};
 
 use axum::{routing::get, Json, Router};
+use genesis_core::ledger::Ledger;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug)]
 struct Config {
     bind_addr: SocketAddr,
     log_filter: EnvFilter,
+    ledger_path: PathBuf,
 }
 
 impl Config {
     fn from_env() -> Result<Self, String> {
-        Self::from_values(
+        let mut config = Self::from_values(
             env::var("GENESIS_BIND_ADDR").ok().as_deref(),
             env::var("GENESIS_LOG").ok().as_deref(),
-        )
+        )?;
+        config.ledger_path = env::var_os("GENESIS_LEDGER_PATH")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("./genesis-ledger.sqlite3"));
+        Ok(config)
     }
 
     fn from_values(bind_addr: Option<&str>, log_filter: Option<&str>) -> Result<Self, String> {
@@ -27,6 +34,7 @@ impl Config {
         Ok(Self {
             bind_addr,
             log_filter,
+            ledger_path: PathBuf::from("./genesis-ledger.sqlite3"),
         })
     }
 }
@@ -46,6 +54,7 @@ async fn health() -> Json<serde_json::Value> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
+    let _ledger = Ledger::open(&config.ledger_path)?;
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(config.log_filter)
