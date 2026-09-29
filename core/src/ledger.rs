@@ -280,7 +280,7 @@ impl Ledger {
 fn allowed(current: &Status, next: &Status) -> bool {
     matches!(
         (current, next),
-        (Status::Accepted, Status::Sent | Status::Failed)
+        (Status::Accepted, Status::Sent | Status::Unknown | Status::Failed)
             | (
                 Status::Sent,
                 Status::ProviderConfirmed
