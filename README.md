@@ -16,11 +16,11 @@ Genesis načíta jedno skutočné svetlo z Home Assistantu, zobrazí jeho stav n
 | `adapters/home-assistant/` | Prvý adaptér: discovery, stav, povely a spätná synchronizácia s HA |
 | `panel/` | jeden Flutter/Dart projekt pre nástenný iPad kontrolný panel, iPhone a web; Linux panel podľa pilotu |
 | `ha-app/` | Balenie Genesis ako Home Assistant app (predtým add-on) pre HA OS |
-| `contracts/` | Verziované API a udalosti medzi core, panelom a Elysium |
+| `contracts/` | Verziovaná v1 JSON Schema pre domácnosť, zariadenie, schopnosť, pozorovanie a príkaz |
 | `docs/` | Architektúra, rozhodnutia a prevádzkové návody |
 | `tests/` | End-to-end scenáre a dôkazy z fyzických zariadení |
 
-Adresáre zatiaľ obsahujú iba svoje úvodné popisy. Implementácia a build príkazy pribudnú s prvým funkčným vertikálnym scenárom.
+V `contracts/` je implementovaná a testovaná prvá verzia wire kontraktu. Core, adaptér, panel a HA app zatiaľ neobsahujú funkčný runtime.
 
 ## Hranice systému
 
