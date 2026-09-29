@@ -242,6 +242,17 @@ mod tests {
     };
     use tower::ServiceExt;
 
+    fn test_state(read_token: Option<String>) -> AppState {
+        AppState {
+            inventory: Inventory::new(),
+            read_token,
+            write_token: None,
+            household_id: "pilot-home".to_owned(),
+            ledger: Arc::new(Mutex::new(Ledger::open(":memory:").unwrap())),
+            ha_config: None,
+        }
+    }
+
     #[test]
     fn config_defaults_to_loopback() {
         let config = Config::from_values(None, None).unwrap();
@@ -260,10 +271,7 @@ mod tests {
 
     #[tokio::test]
     async fn devices_require_token() {
-        let state = AppState {
-            inventory: Inventory::new(),
-            read_token: Some("a".repeat(32)),
-        };
+        let state = test_state(Some("a".repeat(32)));
         let response = app(state.clone())
             .oneshot(
                 Request::builder()
@@ -289,10 +297,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_returns_json() {
-        let response = app(AppState {
-            inventory: Inventory::new(),
-            read_token: None,
-        })
+        let response = app(test_state(None))
         .oneshot(
             Request::builder()
                 .uri("/health")
