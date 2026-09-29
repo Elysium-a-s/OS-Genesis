@@ -281,20 +281,38 @@ fn allowed(current: &Status, next: &Status) -> bool {
     matches!(
         (current, next),
         (Status::Accepted, Status::Sent | Status::Failed)
-            | (Status::Sent, Status::ProviderConfirmed | Status::DeviceConfirmed | Status::Unknown | Status::Failed)
-            | (Status::ProviderConfirmed, Status::DeviceConfirmed | Status::Unknown | Status::Failed)
-            | (Status::Unknown, Status::ProviderConfirmed | Status::DeviceConfirmed | Status::Failed)
+            | (
+                Status::Sent,
+                Status::ProviderConfirmed
+                    | Status::DeviceConfirmed
+                    | Status::Unknown
+                    | Status::Failed
+            )
+            | (
+                Status::ProviderConfirmed,
+                Status::DeviceConfirmed | Status::Unknown | Status::Failed
+            )
+            | (
+                Status::Unknown,
+                Status::ProviderConfirmed | Status::DeviceConfirmed | Status::Failed
+            )
     )
 }
 
 fn valid_details(status: &Status, evidence: &Option<Evidence>, reason: &Option<String>) -> bool {
     let evidence_ok = match status {
-        Status::ProviderConfirmed => matches!(evidence, Some(Evidence { kind: EvidenceKind::ProviderAck, reference, at }) if valid_id(reference) && at.ends_with('Z')),
-        Status::DeviceConfirmed => matches!(evidence, Some(Evidence { kind: EvidenceKind::DeviceObservation, reference, at }) if valid_id(reference) && at.ends_with('Z')),
+        Status::ProviderConfirmed => {
+            matches!(evidence, Some(Evidence { kind: EvidenceKind::ProviderAck, reference, at }) if valid_id(reference) && at.ends_with('Z'))
+        }
+        Status::DeviceConfirmed => {
+            matches!(evidence, Some(Evidence { kind: EvidenceKind::DeviceObservation, reference, at }) if valid_id(reference) && at.ends_with('Z'))
+        }
         _ => evidence.is_none(),
     };
     let reason_ok = match status {
-        Status::Unknown | Status::Failed => reason.as_ref().is_some_and(|r| !r.is_empty() && r.len() <= 500),
+        Status::Unknown | Status::Failed => reason
+            .as_ref()
+            .is_some_and(|r| !r.is_empty() && r.len() <= 500),
         _ => reason.is_none(),
     };
     evidence_ok && reason_ok
@@ -314,7 +332,10 @@ fn validate_request(request: &CommandRequest) -> Result<(), LedgerError> {
             return Err(LedgerError::Invalid(name));
         }
     }
-    if !matches!(request.value, Value::Bool(_) | Value::Number(_) | Value::String(_)) {
+    if !matches!(
+        request.value,
+        Value::Bool(_) | Value::Number(_) | Value::String(_)
+    ) {
         return Err(LedgerError::Invalid("value"));
     }
     Ok(())
@@ -322,8 +343,13 @@ fn validate_request(request: &CommandRequest) -> Result<(), LedgerError> {
 
 fn valid_id(value: &str) -> bool {
     value.len() <= 128
-        && value.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
-        && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphanumeric())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
 }
 
 fn now_utc() -> String {
@@ -335,7 +361,10 @@ mod tests {
     use super::*;
 
     fn actor() -> Actor {
-        Actor { actor_type: ActorType::User, actor_id: "user-1".to_owned() }
+        Actor {
+            actor_type: ActorType::User,
+            actor_id: "user-1".to_owned(),
+        }
     }
 
     fn request() -> CommandRequest {
@@ -369,44 +398,99 @@ mod tests {
         ledger.accept(request()).unwrap();
         let mut conflict = request();
         conflict.value = Value::Bool(false);
-        assert!(matches!(ledger.accept(conflict), Err(LedgerError::IdempotencyConflict)));
+        assert!(matches!(
+            ledger.accept(conflict),
+            Err(LedgerError::IdempotencyConflict)
+        ));
     }
 
     #[test]
     fn sent_is_not_success_and_confirmation_requires_evidence() {
         let mut ledger = Ledger::in_memory().unwrap();
         ledger.accept(request()).unwrap();
-        let sent = ledger.transition("cmd-1", Status::Sent, actor(), None, None).unwrap();
+        let sent = ledger
+            .transition("cmd-1", Status::Sent, actor(), None, None)
+            .unwrap();
         assert_eq!(sent.confirmation_level, "none");
-        assert!(matches!(ledger.transition("cmd-1", Status::DeviceConfirmed, actor(), None, None), Err(LedgerError::InvalidTransition)));
-        let evidence = Evidence { kind: EvidenceKind::ProviderAck, reference: "ack-1".to_owned(), at: now_utc() };
-        let confirmed = ledger.transition("cmd-1", Status::ProviderConfirmed, actor(), Some(evidence), None).unwrap();
+        assert!(matches!(
+            ledger.transition("cmd-1", Status::DeviceConfirmed, actor(), None, None),
+            Err(LedgerError::InvalidTransition)
+        ));
+        let evidence = Evidence {
+            kind: EvidenceKind::ProviderAck,
+            reference: "ack-1".to_owned(),
+            at: now_utc(),
+        };
+        let confirmed = ledger
+            .transition(
+                "cmd-1",
+                Status::ProviderConfirmed,
+                actor(),
+                Some(evidence),
+                None,
+            )
+            .unwrap();
         assert_eq!(confirmed.confirmation_level, "provider");
         assert_eq!(ledger.events("cmd-1").unwrap().len(), 3);
-        assert!(ledger.events("cmd-1").unwrap().iter().all(|event| event.at.ends_with('Z') && event.correlation_id == "corr-1" && event.idempotency_key == "idem-1"));
+        assert!(ledger
+            .events("cmd-1")
+            .unwrap()
+            .iter()
+            .all(|event| event.at.ends_with('Z')
+                && event.correlation_id == "corr-1"
+                && event.idempotency_key == "idem-1"));
     }
 
     #[test]
     fn unknown_cannot_be_sent_again_but_can_be_reconciled() {
         let mut ledger = Ledger::in_memory().unwrap();
         ledger.accept(request()).unwrap();
-        ledger.transition("cmd-1", Status::Sent, actor(), None, None).unwrap();
-        ledger.transition("cmd-1", Status::Unknown, actor(), None, Some("timeout".to_owned())).unwrap();
-        assert!(matches!(ledger.transition("cmd-1", Status::Sent, actor(), None, None), Err(LedgerError::InvalidTransition)));
-        let evidence = Evidence { kind: EvidenceKind::DeviceObservation, reference: "obs-1".to_owned(), at: now_utc() };
-        let confirmed = ledger.transition("cmd-1", Status::DeviceConfirmed, actor(), Some(evidence), None).unwrap();
+        ledger
+            .transition("cmd-1", Status::Sent, actor(), None, None)
+            .unwrap();
+        ledger
+            .transition(
+                "cmd-1",
+                Status::Unknown,
+                actor(),
+                None,
+                Some("timeout".to_owned()),
+            )
+            .unwrap();
+        assert!(matches!(
+            ledger.transition("cmd-1", Status::Sent, actor(), None, None),
+            Err(LedgerError::InvalidTransition)
+        ));
+        let evidence = Evidence {
+            kind: EvidenceKind::DeviceObservation,
+            reference: "obs-1".to_owned(),
+            at: now_utc(),
+        };
+        let confirmed = ledger
+            .transition(
+                "cmd-1",
+                Status::DeviceConfirmed,
+                actor(),
+                Some(evidence),
+                None,
+            )
+            .unwrap();
         assert_eq!(confirmed.confirmation_level, "device");
     }
 
     #[test]
     fn ledger_survives_reopen() {
-        let path = std::env::temp_dir().join(format!("genesis-ledger-{}.sqlite", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("genesis-ledger-{}.sqlite", std::process::id()));
         {
             let mut ledger = Ledger::open(&path).unwrap();
             ledger.accept(request()).unwrap();
         }
         let ledger = Ledger::open(&path).unwrap();
-        assert_eq!(ledger.get("cmd-1").unwrap().unwrap().status, Status::Accepted);
+        assert_eq!(
+            ledger.get("cmd-1").unwrap().unwrap().status,
+            Status::Accepted
+        );
         assert_eq!(ledger.events("cmd-1").unwrap().len(), 1);
         std::fs::remove_file(path).unwrap();
     }
