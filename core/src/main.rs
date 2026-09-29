@@ -11,7 +11,7 @@ use genesis_core::{
     ha_command,
     ledger::{Actor, ActorType, CommandRequest, Ledger, LedgerError, Snapshot},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
@@ -24,6 +24,8 @@ struct Config {
     ledger_path: PathBuf,
     read_token: Option<String>,
     write_token: Option<String>,
+    member_token: Option<String>,
+    guest_token: Option<String>,
     household_id: String,
 }
 
@@ -39,6 +41,8 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("./genesis-ledger.sqlite3"));
         config.read_token = env::var("GENESIS_READ_TOKEN").ok();
         config.write_token = env::var("GENESIS_WRITE_TOKEN").ok();
+        config.member_token = env::var("GENESIS_MEMBER_TOKEN").ok();
+        config.guest_token = env::var("GENESIS_GUEST_TOKEN").ok();
         config.household_id =
             env::var("GENESIS_HOUSEHOLD_ID").unwrap_or_else(|_| "pilot-home".to_owned());
         if config
@@ -54,6 +58,27 @@ impl Config {
             .is_some_and(|token| token.len() < 32)
         {
             return Err("GENESIS_WRITE_TOKEN must have at least 32 characters".to_owned());
+        }
+        for (name, token) in [
+            ("GENESIS_MEMBER_TOKEN", &config.member_token),
+            ("GENESIS_GUEST_TOKEN", &config.guest_token),
+        ] {
+            if token.as_ref().is_some_and(|value| value.len() < 32) {
+                return Err(format!("{name} must have at least 32 characters"));
+            }
+        }
+        let tokens = [
+            config.read_token.as_deref(),
+            config.write_token.as_deref(),
+            config.member_token.as_deref(),
+            config.guest_token.as_deref(),
+        ];
+        for left in 0..tokens.len() {
+            for right in (left + 1)..tokens.len() {
+                if tokens[left].is_some() && tokens[left] == tokens[right] {
+                    return Err("Genesis access tokens must be distinct".to_owned());
+                }
+            }
         }
         if config.household_id.is_empty() || config.household_id.len() > 128 {
             return Err("GENESIS_HOUSEHOLD_ID must have 1-128 characters".to_owned());
@@ -74,6 +99,8 @@ impl Config {
             ledger_path: PathBuf::from("./genesis-ledger.sqlite3"),
             read_token: None,
             write_token: None,
+            member_token: None,
+            guest_token: None,
             household_id: "pilot-home".to_owned(),
         })
     }
@@ -102,6 +129,7 @@ struct NewCommand {
 fn app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/v1/me", get(me))
         .route("/v1/devices", get(devices))
         .route("/v1/commands", axum::routing::post(create_command))
         .route("/v1/commands/{command_id}", get(get_command))
@@ -112,20 +140,59 @@ async fn devices(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ha::Device>>, StatusCode> {
-    authorize(&headers, state.read_token.as_deref())?;
+    principal(&headers, &state)?;
     Ok(Json(state.inventory.devices().await))
 }
 
-fn authorize(headers: &HeaderMap, token: Option<&str>) -> Result<(), StatusCode> {
-    let token = token.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+#[derive(Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum Role {
+    Owner,
+    Member,
+    Guest,
+    Service,
+}
+
+#[derive(Serialize)]
+struct Principal {
+    household_id: String,
+    actor_id: &'static str,
+    role: Role,
+    can_control_devices: bool,
+}
+
+fn principal(headers: &HeaderMap, state: &AppState) -> Result<Principal, StatusCode> {
+    let tokens = [
+        (state.write_token.as_deref(), Role::Owner, "pilot-owner"),
+        (state.member_token.as_deref(), Role::Member, "pilot-member"),
+        (state.guest_token.as_deref(), Role::Guest, "pilot-guest"),
+        (state.read_token.as_deref(), Role::Service, "pilot-service"),
+    ];
+    if tokens.iter().all(|(token, _, _)| token.is_none()) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let supplied = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.as_bytes().strip_prefix(b"Bearer "))
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    if supplied.ct_eq(token.as_bytes()).unwrap_u8() != 1 {
-        return Err(StatusCode::UNAUTHORIZED);
+    for (token, role, actor_id) in tokens {
+        if token.is_some_and(|value| supplied.ct_eq(value.as_bytes()).unwrap_u8() == 1) {
+            return Ok(Principal {
+                household_id: state.household_id.clone(),
+                actor_id,
+                role,
+                can_control_devices: matches!(role, Role::Owner | Role::Member),
+            });
+        }
     }
-    Ok(())
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+async fn me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Principal>, StatusCode> {
+    Ok(Json(principal(&headers, &state)?))
 }
 
 async fn create_command(
@@ -133,7 +200,10 @@ async fn create_command(
     headers: HeaderMap,
     Json(input): Json<NewCommand>,
 ) -> Result<Json<Snapshot>, StatusCode> {
-    authorize(&headers, state.write_token.as_deref())?;
+    let caller = principal(&headers, &state)?;
+    if !caller.can_control_devices {
+        return Err(StatusCode::FORBIDDEN);
+    }
     if input.household_id != state.household_id {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -154,7 +224,7 @@ async fn create_command(
     let command_id = format!("cmd:{}", Uuid::new_v4());
     let actor = Actor {
         actor_type: ActorType::User,
-        actor_id: "pilot-owner".to_owned(),
+        actor_id: caller.actor_id.to_owned(),
     };
     let request = CommandRequest {
         household_id: input.household_id,
@@ -189,7 +259,7 @@ async fn get_command(
     Path(command_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<Snapshot>, StatusCode> {
-    authorize(&headers, state.read_token.as_deref())?;
+    principal(&headers, &state)?;
     let ledger = state.ledger.lock().await;
     let snapshot = ledger
         .get(&command_id)
@@ -241,6 +311,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             inventory,
             read_token: config.read_token,
             write_token: config.write_token,
+            member_token: config.member_token,
+            guest_token: config.guest_token,
             household_id: config.household_id,
             ledger,
             ha_config,
@@ -271,6 +343,8 @@ mod tests {
             inventory: Inventory::new(),
             read_token,
             write_token: None,
+            member_token: None,
+            guest_token: None,
             household_id: "pilot-home".to_owned(),
             ledger: Arc::new(Mutex::new(Ledger::open(":memory:").unwrap())),
             ha_config: None,
@@ -356,6 +430,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn roles_are_enforced_by_api_and_bound_to_household() {
+        let mut state = test_state(Some("r".repeat(32)));
+        state.write_token = Some("o".repeat(32));
+        state.member_token = Some("m".repeat(32));
+        state.guest_token = Some("g".repeat(32));
+        for (token, role, controls) in [
+            ("o".repeat(32), "owner", true),
+            ("m".repeat(32), "member", true),
+            ("g".repeat(32), "guest", false),
+            ("r".repeat(32), "service", false),
+        ] {
+            let response = app(state.clone())
+                .oneshot(Request::builder().uri("/v1/me")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), 1024).await.unwrap();
+            let me: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(me["role"], role);
+            assert_eq!(me["household_id"], "pilot-home");
+            assert_eq!(me["can_control_devices"], controls);
+        }
+        let body = serde_json::json!({
+            "household_id": "pilot-home", "device_id": "ha:light.living",
+            "value": true, "idempotency_key": "idem-role", "correlation_id": "corr-role"
+        }).to_string();
+        for token in ["g".repeat(32), "r".repeat(32)] {
+            let response = app(state.clone())
+                .oneshot(Request::builder().method("POST").uri("/v1/commands")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(body.clone())).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        let response = app(state)
+            .oneshot(Request::builder().method("POST").uri("/v1/commands")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", "m".repeat(32)))
+                .body(Body::from(serde_json::json!({
+                    "household_id": "other-home", "device_id": "ha:light.living",
+                    "value": true, "idempotency_key": "idem-other", "correlation_id": "corr-other"
+                }).to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
