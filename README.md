@@ -14,7 +14,7 @@ Genesis načíta jedno skutočné svetlo z Home Assistantu, zobrazí jeho stav n
 | --- | --- |
 | `core/` | Rust služba: API, domácnosti, zariadenia, oprávnenia, príkazy, udalosti |
 | `adapters/home-assistant/` | Prvý adaptér: discovery, stav, povely a spätná synchronizácia s HA |
-| `panel/` | Flutter/Dart kontrolné centrum pre iPadOS, iOS a web; Linux panel podľa pilotu |
+| `panel/` | jeden Flutter/Dart projekt pre nástenný iPad kontrolný panel, iPhone a web; Linux panel podľa pilotu |
 | `ha-app/` | Balenie Genesis ako Home Assistant app (predtým add-on) pre HA OS |
 | `contracts/` | Verziované API a udalosti medzi core, panelom a Elysium |
 | `docs/` | Architektúra, rozhodnutia a prevádzkové návody |
@@ -25,10 +25,10 @@ Adresáre zatiaľ obsahujú iba svoje úvodné popisy. Implementácia a build pr
 ## Hranice systému
 
 - Genesis core beží na Linuxe; Rust je východiskový jazyk služby, nie vlastný kernel.
-- Flutter je klientské rozhranie, nie operačný systém ani ovládač rádiových protokolov.
+- Všetky nové Genesis používateľské rozhrania vrátane nástenného iPad kontrolného panelu sa vyvíjajú vo Flutteri/Darte. Flutter je klientské rozhranie, nie operačný systém ani ovládač rádiových protokolov.
 - HA adaptér je prvá cesta k zariadeniam. Genesis nesmie vydávať prijatie povelu za potvrdenú fyzickú zmenu.
 - Elysium Behavior rozhoduje o cieli a oprávnení; Genesis kontroluje vykonateľnosť, vykoná akciu a vráti pravdivý výsledok.
-- Existujúca Elysium iOS aplikácia, FastAPI backend a PostgreSQL zostávajú vo vlastných repozitároch. Zmeny ich kontraktov sa robia v príslušných repozitároch.
+- Existujúca Elysium iOS aplikácia zostáva v Swifte a prepája sa s Genesis Flutter panelom cez API alebo deep link; FastAPI backend a PostgreSQL zostávajú vo vlastných repozitároch. Zmeny ich kontraktov sa robia v príslušných repozitároch.
 
 ## Poradie vývoja
 
