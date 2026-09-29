@@ -121,9 +121,8 @@ enum HaError {
     Disconnected,
 }
 
-type Socket = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 pub async fn run(config: HaConfig, inventory: Inventory) {
     loop {
@@ -144,15 +143,26 @@ async fn run_session(config: &HaConfig, inventory: &Inventory) -> Result<(), HaE
     if greeting["type"] != "auth_required" {
         return Err(HaError::Protocol);
     }
-    send_json(&mut socket, json!({"type": "auth", "access_token": config.token})).await?;
+    send_json(
+        &mut socket,
+        json!({"type": "auth", "access_token": config.token}),
+    )
+    .await?;
     let auth = next_json(&mut socket).await?;
     if auth["type"] != "auth_ok" {
         return Err(HaError::Authentication);
     }
 
-    send_json(&mut socket, json!({"id": 1, "type": "subscribe_events", "event_type": "state_changed"})).await?;
+    send_json(
+        &mut socket,
+        json!({"id": 1, "type": "subscribe_events", "event_type": "state_changed"}),
+    )
+    .await?;
     let subscription = next_json(&mut socket).await?;
-    if subscription["type"] != "result" || subscription["id"] != 1 || subscription["success"] != true {
+    if subscription["type"] != "result"
+        || subscription["id"] != 1
+        || subscription["success"] != true
+    {
         return Err(HaError::Protocol);
     }
     send_json(&mut socket, json!({"id": 2, "type": "get_states"})).await?;
@@ -170,7 +180,10 @@ async fn run_session(config: &HaConfig, inventory: &Inventory) -> Result<(), HaE
             for event in &buffered_events {
                 inventory.apply_event(event).await;
             }
-            tracing::info!(count = inventory.devices().await.len(), "Home Assistant inventory loaded");
+            tracing::info!(
+                count = inventory.devices().await.len(),
+                "Home Assistant inventory loaded"
+            );
             break;
         } else {
             return Err(HaError::Protocol);
@@ -187,18 +200,26 @@ async fn run_session(config: &HaConfig, inventory: &Inventory) -> Result<(), HaE
 
 async fn next_json(socket: &mut Socket) -> Result<Value, HaError> {
     loop {
-        let frame = socket.next().await.ok_or(HaError::Disconnected)?
+        let frame = socket
+            .next()
+            .await
+            .ok_or(HaError::Disconnected)?
             .map_err(|_| HaError::Disconnected)?;
         match frame {
-            Message::Text(text) => return serde_json::from_str(&text).map_err(|_| HaError::Protocol),
+            Message::Text(text) => {
+                return serde_json::from_str(&text).map_err(|_| HaError::Protocol)
+            }
             Message::Close(_) => return Err(HaError::Disconnected),
-            Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => continue,
+            Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {
+                continue
+            }
         }
     }
 }
 
 async fn send_json(socket: &mut Socket, value: Value) -> Result<(), HaError> {
-    socket.send(Message::Text(value.to_string().into()))
+    socket
+        .send(Message::Text(value.to_string().into()))
         .await
         .map_err(|_| HaError::Disconnected)
 }
@@ -218,7 +239,8 @@ fn map_state(state: &Value) -> Option<Device> {
         "unavailable" => (None, Availability::Offline),
         _ => (None, Availability::Unknown),
     };
-    let name = state.get("attributes")
+    let name = state
+        .get("attributes")
         .and_then(|attributes| attributes.get("friendly_name"))
         .and_then(Value::as_str)
         .unwrap_or(entity_id)
@@ -268,7 +290,11 @@ mod tests {
                 send_server(&mut socket, json!({"type":"auth_ok"})).await;
                 let subscription = read_server(&mut socket).await;
                 assert_eq!(subscription["type"], "subscribe_events");
-                send_server(&mut socket, json!({"type":"result","id":1,"success":true,"result":null})).await;
+                send_server(
+                    &mut socket,
+                    json!({"type":"result","id":1,"success":true,"result":null}),
+                )
+                .await;
                 let get_states = read_server(&mut socket).await;
                 assert_eq!(get_states["type"], "get_states");
                 send_server(&mut socket, json!({"type":"result","id":2,"success":true,"result":[{"entity_id":"light.living","state":"on","attributes":{"friendly_name":"Living"}}]})).await;
@@ -276,7 +302,10 @@ mod tests {
             }
         });
         let inventory = Inventory::new();
-        let config = HaConfig { websocket_url: format!("ws://{address}/api/websocket"), token: "test-secret".to_owned() };
+        let config = HaConfig {
+            websocket_url: format!("ws://{address}/api/websocket"),
+            token: "test-secret".to_owned(),
+        };
         run_session(&config, &inventory).await.unwrap_err();
         assert_eq!(inventory.devices().await[0].power, Some(true));
         inventory.mark_unknown().await;
@@ -286,11 +315,19 @@ mod tests {
         server.await.unwrap();
     }
 
-    async fn send_server(socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>, value: Value) {
-        socket.send(Message::Text(value.to_string().into())).await.unwrap();
+    async fn send_server(
+        socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        value: Value,
+    ) {
+        socket
+            .send(Message::Text(value.to_string().into()))
+            .await
+            .unwrap();
     }
 
-    async fn read_server(socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) -> Value {
+    async fn read_server(
+        socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    ) -> Value {
         let frame = socket.next().await.unwrap().unwrap();
         serde_json::from_str(frame.to_text().unwrap()).unwrap()
     }
