@@ -319,6 +319,7 @@ mod tests {
             capability_type: "switch",
             writable: true,
             power: Some(false),
+            observed_at: None,
             availability: Availability::Online,
         };
         let config = HaConfig {

@@ -83,6 +83,7 @@ pub struct Device {
     pub capability_type: &'static str,
     pub writable: bool,
     pub power: Option<bool>,
+    pub observed_at: Option<String>,
     pub availability: Availability,
 }
 
@@ -253,6 +254,10 @@ fn map_state(state: &Value) -> Option<Device> {
         capability_type: "switch",
         writable: true,
         power,
+        observed_at: state
+            .get("last_updated")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         availability,
     })
 }
