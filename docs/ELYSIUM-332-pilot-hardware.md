@@ -30,14 +30,14 @@ Zdroj parametrov: [Home Assistant Green](https://www.home-assistant.io/green). P
 
 ## 2. Prvé fyzické zariadenie
 
-**Plánované zariadenie: Wi‑Fi žiarovka ovládaná cez Smart Life.** Používateľ uviedol, že ešte nie je pripojená. Presný výrobca/model nie je známy, preto nie je možné deklarovať fyzickú podporu alebo výsledok príkazu.
+**Pilotná kategória: žiarovky „Smart Bulb“ ovládané cez Smart Life.** Používateľ upresnil, že ide o viac žiaroviek, nie o obchodný názov alebo presný model jednej z nich. Cieľová žiarovka ešte nie je pripojená do Home Assistantu. Presný výrobca/model vybranej žiarovky nie je známy, preto nie je možné deklarovať fyzickú podporu alebo výsledok príkazu.
 
 | Povinný údaj | Hodnota |
 | --- | --- |
-| Kategória (svetlo alebo zásuvka) | Wi‑Fi žiarovka, plánovaná |
-| Výrobca a presný model | Čaká na výber |
+| Kategória (svetlo alebo zásuvka) | Žiarovky „Smart Bulb“; na prvý test sa vyberie jedna z nich |
+| Výrobca a presný model | Neznámy; „Smart Bulb“ je označenie žiaroviek používateľa, nie potvrdený model |
 | HA integrácia / entity ID | Plánovaná oficiálna integrácia Tuya pre Smart Life; potvrdiť po pripojení; entity ID zatiaľ neexistuje |
-| Cesta spojenia (Wi‑Fi, Ethernet, Zigbee, Matter, hub/cloud) | Žiarovka cez Wi‑Fi do Smart Life; Home Assistant cez Tuya integráciu (cloud push podľa HA dokumentácie); skutočná cesta po spárovaní neoverená |
+| Cesta spojenia (Wi‑Fi, Ethernet, Zigbee, Matter, hub/cloud) | Žiarovky sú plánované cez Wi‑Fi a Smart Life; Home Assistant cez Tuya integráciu (cloud push podľa HA dokumentácie); skutočná cesta po spárovaní neoverená |
 | Schopnosti pre pilot | Čítanie stavu; bezpečné zapnutie a vypnutie |
 | Potvrdenie výsledku | Zistiť, či HA poskytne čerstvý stav po povele; provider odpoveď sama osebe nie je fyzické potvrdenie |
 | Fyzický dôkaz | Test vykonať na skutočnom zariadení, nie iba v simulátore |
@@ -65,7 +65,7 @@ Požiadať vlastníka o hodnoty **Installation type, Core, Supervisor, Operating
 - [x] Obmedzenia pre HA app a lokálny hlas zapísané ako návrh merania.
 - [x] Skutočný typ inštalácie a verzie HA Core/OS potvrdené screenshotom z jednotky.
 - [ ] Architektúra a verzia Supervisor potvrdené zo System information.
-- [x] Zvolená kategória a plánovaná cesta: Wi‑Fi žiarovka.
+- [x] Zvolená kategória a plánovaná cesta: žiarovky „Smart Bulb“ cez Wi‑Fi/Smart Life; na test vybrať jednu.
 - [x] Plánovaná aplikácia Smart Life a zodpovedajúca HA Tuya integrácia zdokumentované.
 - [ ] Presný model, skutočná HA integrácia a fyzické pripojenie potvrdené.
 - [ ] Priestor a voľná RAM zmerané alebo označené ako riziko pred nasadením.
