@@ -115,6 +115,8 @@ struct AppState {
     inventory: Inventory,
     read_token: Option<String>,
     write_token: Option<String>,
+    member_token: Option<String>,
+    guest_token: Option<String>,
     household_id: String,
     ledger: Arc<Mutex<Ledger>>,
     ha_config: Option<HaConfig>,
