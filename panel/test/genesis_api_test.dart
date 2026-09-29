@@ -41,6 +41,14 @@ void main() {
     final calls = <http.Request>[];
     final client = MockClient((request) async {
       calls.add(request);
+      if (request.url.path == '/v1/me') {
+        return http.Response(jsonEncode({
+          'household_id': 'pilot-home',
+          'actor_id': 'pilot-member',
+          'role': 'member',
+          'can_control_devices': true,
+        }), 200);
+      }
       if (request.url.path == '/v1/devices') {
         return http.Response(jsonEncode([
           {
@@ -63,6 +71,9 @@ void main() {
       baseUrl: Uri.parse('http://green.local:8765'),
       client: client,
     );
+    final me = await api.me('member-secret');
+    expect(me.role, 'member');
+    expect(me.canControlDevices, true);
     final devices = await api.devices('read-secret');
     expect(devices.single.id, 'ha:light.living');
     final result = await api.setPower(
@@ -72,8 +83,9 @@ void main() {
       value: true,
     );
     expect(result.status, 'provider_confirmed');
-    expect(calls[0].headers['Authorization'], 'Bearer read-secret');
-    expect(calls[1].headers['Authorization'], 'Bearer write-secret');
-    expect(jsonDecode(calls[1].body)['value'], true);
+    expect(calls[0].headers['Authorization'], 'Bearer member-secret');
+    expect(calls[1].headers['Authorization'], 'Bearer read-secret');
+    expect(calls[2].headers['Authorization'], 'Bearer write-secret');
+    expect(jsonDecode(calls[2].body)['value'], true);
   });
 }

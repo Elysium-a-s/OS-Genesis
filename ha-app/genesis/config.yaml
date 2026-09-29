@@ -19,6 +19,10 @@ watchdog: http://[HOST]:[PORT:8080]/health
 options:
   read_token: null
   write_token: null
+  member_token: null
+  guest_token: null
 schema:
   read_token: password
   write_token: password
+  member_token: password?
+  guest_token: password?

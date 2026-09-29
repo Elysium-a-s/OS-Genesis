@@ -2,6 +2,28 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+class GenesisPrincipal {
+  const GenesisPrincipal({
+    required this.householdId,
+    required this.actorId,
+    required this.role,
+    required this.canControlDevices,
+  });
+
+  final String householdId;
+  final String actorId;
+  final String role;
+  final bool canControlDevices;
+
+  factory GenesisPrincipal.fromJson(Map<String, dynamic> json) =>
+      GenesisPrincipal(
+        householdId: json['household_id'] as String,
+        actorId: json['actor_id'] as String,
+        role: json['role'] as String,
+        canControlDevices: json['can_control_devices'] as bool,
+      );
+}
+
 class GenesisDevice {
   const GenesisDevice({
     required this.id,
@@ -55,6 +77,19 @@ class GenesisApi {
   final bool _ownsClient;
 
   Uri _path(String path) => baseUrl.resolve(path);
+
+  Future<GenesisPrincipal> me(String accessToken) async {
+    final response = await _client.get(
+      _path('/v1/me'),
+      headers: {'Authorization': 'Bearer $accessToken'},
+    ).timeout(const Duration(seconds: 5));
+    if (response.statusCode != 200) {
+      throw StateError('Genesis identity HTTP ${response.statusCode}');
+    }
+    return GenesisPrincipal.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
 
   Future<List<GenesisDevice>> devices(String readToken) async {
     final response = await _client.get(
