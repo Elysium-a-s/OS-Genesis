@@ -21,13 +21,14 @@ The root schema accepts five message kinds: `household`, `device`, `capability`,
 
 - `observation` stores a reported value, source, observed/received timestamps, quality, and correlation ID. `unknown` quality carries `null` value. Timestamps use UTC RFC 3339 form ending in `Z`; the validator checks the date-time format.
 - `command` carries a stable `command_id`, `idempotency_key`, `correlation_id`, actor, requested value, current status, confirmation level, and timestamps. Repeated requests with the same household + idempotency key must return the same logical command result rather than perform a second physical action. The service owns this guarantee.
+- `accepted` znamená, že Genesis uložil zámer a idempotency key. Neznamená odoslanie ani vykonanie. `sent` znamená iba pokus odoslať príkaz.
 - `provider_confirmed` requires provider acknowledgment evidence. It means the Home Assistant or other provider accepted the command, **not** that the physical device changed state.
 - `device_confirmed` requires a correlated device observation. The service must verify that the observation is fresh, belongs to the same device/capability, and matches the requested value before emitting this status.
 - `unknown` is an explicit outcome when the actual effect cannot be established. It cannot claim device confirmation. A timeout, failure, or rejection requires a reason.
-- The command object is a snapshot. The eventual execution ledger must retain each status change as an append-only event with its own timestamp, actor, and correlation ID; overwriting this object is not an audit log.
+- The command object is a snapshot. The execution ledger in `core/src/ledger.rs` retains each status change as an append-only event with its own timestamp, actor, and correlation ID; overwriting this object is not an audit log.
 
 ## Evolution
 
-Version `1.0` is intentionally narrow. A breaking field or semantic change requires a new versioned schema directory and migration plan. Additive changes within v1 require a reviewed schema change, examples, and tests; existing clients must not silently accept unknown fields. Persisted events must retain their original schema version.
+Version `1.0` is intentionally narrow. A breaking field or semantic change requires a new versioned schema directory and migration plan. Additive changes within v1 require a reviewed schema change, examples, and tests; existing clients must not silently accept unknown fields. The `accepted` enum value was added for ELYSIUM-335; consumers of v1 must handle it as a non-confirmed state. Persisted events must retain their original schema version.
 
 The Elysium Behavior authorization and time-bound entitlement payloads are separate work in ELYSIUM-342. This v1 contract does not grant access by itself.
