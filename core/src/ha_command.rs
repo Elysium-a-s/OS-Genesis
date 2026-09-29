@@ -37,14 +37,32 @@ pub async fn execute(
     match result {
         Ok(Ok(())) => {}
         Ok(Err(CommandError::BeforeSend)) => {
-            ledger.transition(command_id, Status::Failed, actor, None, Some("ha_unavailable".into()))?;
+            ledger.transition(
+                command_id,
+                Status::Failed,
+                actor,
+                None,
+                Some("ha_unavailable".into()),
+            )?;
         }
         Ok(Err(CommandError::Rejected)) => {
-            ledger.transition(command_id, Status::Failed, actor, None, Some("provider_rejected".into()))?;
+            ledger.transition(
+                command_id,
+                Status::Failed,
+                actor,
+                None,
+                Some("provider_rejected".into()),
+            )?;
         }
         Ok(Err(CommandError::AfterSend)) | Err(_) => {
             if current.status != Status::DeviceConfirmed {
-                ledger.transition(command_id, Status::Unknown, actor, None, Some("result_unverified".into()))?;
+                ledger.transition(
+                    command_id,
+                    Status::Unknown,
+                    actor,
+                    None,
+                    Some("result_unverified".into()),
+                )?;
             }
         }
     }
@@ -62,57 +80,81 @@ async fn run_command(
     let (mut socket, _) = connect_async(&config.websocket_url)
         .await
         .map_err(|_| CommandError::BeforeSend)?;
-    let greeting = next_json(&mut socket).await.map_err(|_| CommandError::BeforeSend)?;
+    let greeting = next_json(&mut socket)
+        .await
+        .map_err(|_| CommandError::BeforeSend)?;
     if greeting["type"] != "auth_required" {
         return Err(CommandError::BeforeSend);
     }
-    send_json(&mut socket, json!({"type":"auth","access_token":config.token}))
+    send_json(
+        &mut socket,
+        json!({"type":"auth","access_token":config.token}),
+    )
+    .await
+    .map_err(|_| CommandError::BeforeSend)?;
+    let auth = next_json(&mut socket)
         .await
         .map_err(|_| CommandError::BeforeSend)?;
-    let auth = next_json(&mut socket).await.map_err(|_| CommandError::BeforeSend)?;
     if auth["type"] != "auth_ok" {
         return Err(CommandError::BeforeSend);
     }
-    send_json(&mut socket, json!({"id":1,"type":"subscribe_events","event_type":"state_changed"}))
+    send_json(
+        &mut socket,
+        json!({"id":1,"type":"subscribe_events","event_type":"state_changed"}),
+    )
+    .await
+    .map_err(|_| CommandError::BeforeSend)?;
+    let sub = next_json(&mut socket)
         .await
         .map_err(|_| CommandError::BeforeSend)?;
-    let sub = next_json(&mut socket).await.map_err(|_| CommandError::BeforeSend)?;
     if sub["type"] != "result" || sub["id"] != 1 || sub["success"] != true {
         return Err(CommandError::BeforeSend);
     }
 
-    let domain = device.provider_device_ref.split('.').next().ok_or(CommandError::BeforeSend)?;
+    let domain = device
+        .provider_device_ref
+        .split('.')
+        .next()
+        .ok_or(CommandError::BeforeSend)?;
     if domain != "light" && domain != "switch" {
         return Err(CommandError::BeforeSend);
     }
     let service = if desired { "turn_on" } else { "turn_off" };
-    send_json(&mut socket, json!({
-        "id":2,
-        "type":"call_service",
-        "domain":domain,
-        "service":service,
-        "target":{"entity_id":device.provider_device_ref}
-    }))
+    send_json(
+        &mut socket,
+        json!({
+            "id":2,
+            "type":"call_service",
+            "domain":domain,
+            "service":service,
+            "target":{"entity_id":device.provider_device_ref}
+        }),
+    )
     .await
     .map_err(|_| CommandError::AfterSend)?;
-    ledger.transition(command_id, Status::Sent, actor.clone(), None, None)
+    ledger
+        .transition(command_id, Status::Sent, actor.clone(), None, None)
         .map_err(|_| CommandError::AfterSend)?;
 
     let mut matching_events = Vec::new();
     let mut provider_context: Option<String> = None;
     loop {
-        let message = next_json(&mut socket).await.map_err(|_| CommandError::AfterSend)?;
+        let message = next_json(&mut socket)
+            .await
+            .map_err(|_| CommandError::AfterSend)?;
         if message["type"] == "event" && message["id"] == 1 {
             if matching_state_event(&message, &device.provider_device_ref, desired) {
                 if let Some(context) = event_context(&message) {
                     if provider_context.as_deref() == Some(context) {
-                        ledger.transition(
-                            command_id,
-                            Status::DeviceConfirmed,
-                            actor.clone(),
-                            Some(evidence(EvidenceKind::DeviceObservation, context)),
-                            None,
-                        ).map_err(|_| CommandError::AfterSend)?;
+                        ledger
+                            .transition(
+                                command_id,
+                                Status::DeviceConfirmed,
+                                actor.clone(),
+                                Some(evidence(EvidenceKind::DeviceObservation, context)),
+                                None,
+                            )
+                            .map_err(|_| CommandError::AfterSend)?;
                         return Ok(());
                     }
                     matching_events.push(context.to_owned());
@@ -126,22 +168,26 @@ async fn run_command(
                 .as_str()
                 .filter(|id| valid_reference(id))
                 .ok_or(CommandError::AfterSend)?;
-            ledger.transition(
-                command_id,
-                Status::ProviderConfirmed,
-                actor.clone(),
-                Some(evidence(EvidenceKind::ProviderAck, context)),
-                None,
-            ).map_err(|_| CommandError::AfterSend)?;
+            ledger
+                .transition(
+                    command_id,
+                    Status::ProviderConfirmed,
+                    actor.clone(),
+                    Some(evidence(EvidenceKind::ProviderAck, context)),
+                    None,
+                )
+                .map_err(|_| CommandError::AfterSend)?;
             provider_context = Some(context.to_owned());
             if matching_events.iter().any(|value| value == context) {
-                ledger.transition(
-                    command_id,
-                    Status::DeviceConfirmed,
-                    actor.clone(),
-                    Some(evidence(EvidenceKind::DeviceObservation, context)),
-                    None,
-                ).map_err(|_| CommandError::AfterSend)?;
+                ledger
+                    .transition(
+                        command_id,
+                        Status::DeviceConfirmed,
+                        actor.clone(),
+                        Some(evidence(EvidenceKind::DeviceObservation, context)),
+                        None,
+                    )
+                    .map_err(|_| CommandError::AfterSend)?;
                 return Ok(());
             }
         }
@@ -164,7 +210,9 @@ fn event_context(message: &Value) -> Option<&str> {
 fn valid_reference(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
-        && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
 }
 
 fn evidence(kind: EvidenceKind, reference: &str) -> Evidence {
@@ -187,7 +235,10 @@ async fn next_json(socket: &mut Socket) -> Result<Value, ()> {
 }
 
 async fn send_json(socket: &mut Socket, value: Value) -> Result<(), ()> {
-    socket.send(Message::Text(value.to_string().into())).await.map_err(|_| ())
+    socket
+        .send(Message::Text(value.to_string().into()))
+        .await
+        .map_err(|_| ())
 }
 
 #[cfg(test)]
