@@ -111,6 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     tracing::info!(address = %listener.local_addr()?, "Genesis core listening");
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     axum::serve(
         listener,
         app(AppState {
@@ -118,9 +119,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             read_token: config.read_token,
         }),
     )
-    .with_graceful_shutdown(async {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            tracing::error!(%error, "Shutdown signal handler failed");
+    .with_graceful_shutdown(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = terminate.recv() => {},
         }
     })
     .await?;
