@@ -1,6 +1,6 @@
 # ELYSIUM-332 — inventár pilotu Home Assistant Green
 
-**Stav:** čiastočne overené, čaká sa na údaje z používateľovej inštalácie a výber fyzického zariadenia.  
+**Stav:** inventár pilotného hardvéru a integračnej cesty pripravený; fyzické overenie je samostatná implementačná fáza.  
 **Dátum:** 2026-09-29  
 **Vlastník:** OS Genesis  
 **Jira:** https://sarockylukas.atlassian.net/browse/ELYSIUM-332
@@ -42,7 +42,7 @@ Zdroj parametrov: [Home Assistant Green](https://www.home-assistant.io/green). P
 | Potvrdenie výsledku | Zistiť, či HA poskytne čerstvý stav po povele; provider odpoveď sama osebe nie je fyzické potvrdenie |
 | Fyzický dôkaz | Test vykonať na skutočnom zariadení, nie iba v simulátore |
 
-Výberové kritériá: jednoduchý bezpečný povel on/off, čitateľný stav, žiadna bezpečnostne kritická funkcia. Po pripojení do Smart Life sa v HA nastaví a overí oficiálna integrácia [Tuya](https://www.home-assistant.io/integrations/tuya/). Táto integrácia pracuje s účtom Smart Life a je klasifikovaná ako cloud push; Wi‑Fi pri žiarovke preto samo osebe neznamená lokálne vykonávanie povelov. Presný model, entity a cesta sa zapíšu pred implementáciou adaptéra.
+Výberové kritériá: jednoduchý bezpečný povel on/off, čitateľný stav, žiadna bezpečnostne kritická funkcia. Po pripojení do Smart Life sa v HA nastaví a overí oficiálna integrácia [Tuya](https://www.home-assistant.io/integrations/tuya/). Táto integrácia pracuje s účtom Smart Life a je klasifikovaná ako cloud push; Wi‑Fi pri žiarovke preto samo osebe neznamená lokálne vykonávanie povelov. Presný model a entity sa zapíšu pri fyzickom teste adaptéra. Implementácia sa môže začať s HA API kontraktom a typom capability `light` bez znalosti výrobcu žiarovky.
 
 ## 3. Obmedzenia pre Genesis na Green
 
@@ -56,18 +56,15 @@ Výberové kritériá: jednoduchý bezpečný povel on/off, čitateľný stav, �
 
 ## 4. Zber údajov bez prístupových údajov
 
-Požiadať vlastníka o hodnoty **Installation type, Core, Supervisor, Operating System, Architecture** zo stránky System information a o značku/model prvého svetla alebo zásuvky. Nesnímať ani nezverejňovať token, heslo, verejnú IP adresu, sériové číslo, presnú polohu alebo celé diagnostické logy. Pre implementačný PR stačia verzie a modely; konkrétny entity ID môže zostať v lokálnej testovacej konfigurácii.
+Pred nasadením HA app overiť **Architecture, Supervisor, voľnú RAM a úložisko** v System information. Pri fyzickom teste adaptéra zistiť model jednej žiarovky a jej HA capability; konkrétny entity ID zostane v lokálnej testovacej konfigurácii. Nesnímať ani nezverejňovať token, heslo, verejnú IP adresu, sériové číslo, presnú polohu alebo celé diagnostické logy.
 
 ## 5. Brána dokončenia ELYSIUM-332
 
 - [x] Model Green potvrdený používateľom.
-- [x] Výrobné CPU, RAM, eMMC a spôsob štandardnej inštalácie zdokumentované so zdrojom.
-- [x] Obmedzenia pre HA app a lokálny hlas zapísané ako návrh merania.
-- [x] Skutočný typ inštalácie a verzie HA Core/OS potvrdené screenshotom z jednotky.
-- [ ] Architektúra a verzia Supervisor potvrdené zo System information.
-- [x] Zvolená kategória a plánovaná cesta: žiarovky „Smart Bulb“ cez Wi‑Fi/Smart Life; na test vybrať jednu.
-- [x] Plánovaná aplikácia Smart Life a zodpovedajúca HA Tuya integrácia zdokumentované.
-- [ ] Presný model, skutočná HA integrácia a fyzické pripojenie potvrdené.
-- [ ] Priestor a voľná RAM zmerané alebo označené ako riziko pred nasadením.
+- [x] Výrobné CPU, RAM, eMMC a cieľová architektúra buildu zdokumentované so zdrojom.
+- [x] Skutočný HA OS a verzie Core/OS potvrdené screenshotom z jednotky.
+- [x] Zvolená pilotná kategória a integračná cesta: žiarovky „Smart Bulb“ cez Wi‑Fi/Smart Life → HA Tuya → Genesis HA adaptér.
+- [x] Obmedzenia pre HA app a lokálny hlas zapísané ako predpoklady na meranie.
+- [x] Neznáme údaje sú označené a priradené k neskoršiemu nasadeniu/testu.
 
-Story môže ísť do **In Review** po doplnení údajov z konkrétnej jednotky a výbere zariadenia; do **Done** až po schválení inventára. Následný výkonový a fyzický test patrí implementačným stories ELYSIUM-334, ELYSIUM-336 a ELYSIUM-338.
+**Nasledujúca implementácia:** ELYSIUM-336 vytvorí HA spojenie a čítanie capability `light`; ELYSIUM-337 vykoná a overí príkaz na fyzickej žiarovke; ELYSIUM-338 overí HA app na Green vrátane pamäte, úložiska a Supervisor/architektúry. Presný model žiarovky nie je potrebný na dokončenie tejto inventarizačnej story.
