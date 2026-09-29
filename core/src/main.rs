@@ -6,7 +6,10 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use genesis_core::{ha::{self, HaConfig, Inventory}, ledger::Ledger};
+use genesis_core::{
+    ha::{self, HaConfig, Inventory},
+    ledger::Ledger,
+};
 use subtle::ConstantTimeEq;
 use tracing_subscriber::EnvFilter;
 
@@ -28,7 +31,11 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("./genesis-ledger.sqlite3"));
         config.read_token = env::var("GENESIS_READ_TOKEN").ok();
-        if config.read_token.as_ref().is_some_and(|token| token.len() < 32) {
+        if config
+            .read_token
+            .as_ref()
+            .is_some_and(|token| token.len() < 32)
+        {
             return Err("GENESIS_READ_TOKEN must have at least 32 characters".to_owned());
         }
         Ok(config)
@@ -104,13 +111,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     tracing::info!(address = %listener.local_addr()?, "Genesis core listening");
-    axum::serve(listener, app(AppState { inventory, read_token: config.read_token }))
-        .with_graceful_shutdown(async {
-            if let Err(error) = tokio::signal::ctrl_c().await {
-                tracing::error!(%error, "Shutdown signal handler failed");
-            }
-        })
-        .await?;
+    axum::serve(
+        listener,
+        app(AppState {
+            inventory,
+            read_token: config.read_token,
+        }),
+    )
+    .with_graceful_shutdown(async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "Shutdown signal handler failed");
+        }
+    })
+    .await?;
     tracing::info!("Genesis core stopped");
     Ok(())
 }
@@ -142,14 +155,28 @@ mod tests {
 
     #[tokio::test]
     async fn devices_require_token() {
-        let state = AppState { inventory: Inventory::new(), read_token: Some("a".repeat(32)) };
+        let state = AppState {
+            inventory: Inventory::new(),
+            read_token: Some("a".repeat(32)),
+        };
         let response = app(state.clone())
-            .oneshot(Request::builder().uri("/v1/devices").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/devices")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let response = app(state)
-            .oneshot(Request::builder().uri("/v1/devices").header("authorization", format!("Bearer {}", "a".repeat(32))).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/devices")
+                    .header("authorization", format!("Bearer {}", "a".repeat(32)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -157,15 +184,18 @@ mod tests {
 
     #[tokio::test]
     async fn health_returns_json() {
-        let response = app(AppState { inventory: Inventory::new(), read_token: None })
-            .oneshot(
-                Request::builder()
-                    .uri("/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app(AppState {
+            inventory: Inventory::new(),
+            read_token: None,
+        })
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "application/json");
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
