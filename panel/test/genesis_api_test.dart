@@ -17,7 +17,15 @@ void main() {
       writable: true,
     );
     expect(current.isStale, false);
-    expect(current.isStale, false);
+    final unchanged = GenesisDevice(
+      id: current.id,
+      name: current.name,
+      power: true,
+      availability: 'online',
+      observedAt: now.subtract(const Duration(days: 1)),
+      writable: true,
+    );
+    expect(unchanged.isStale, false);
     final unknown = GenesisDevice(
       id: current.id,
       name: current.name,
