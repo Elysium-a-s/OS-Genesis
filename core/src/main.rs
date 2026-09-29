@@ -320,6 +320,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn command_rejects_missing_token_and_other_household() {
+        let mut state = test_state(Some("r".repeat(32)));
+        state.write_token = Some("w".repeat(32));
+        let body = serde_json::json!({
+            "household_id": "other-home",
+            "device_id": "ha:light.living",
+            "value": true,
+            "idempotency_key": "idem-1",
+            "correlation_id": "corr-1"
+        }).to_string();
+        let unauthorized = app(state.clone()).oneshot(
+            Request::builder().method("POST").uri("/v1/commands")
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone())).unwrap()
+        ).await.unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let forbidden = app(state).oneshot(
+            Request::builder().method("POST").uri("/v1/commands")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", "w".repeat(32)))
+                .body(Body::from(body)).unwrap()
+        ).await.unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn health_returns_json() {
         let response = app(test_state(None))
             .oneshot(
