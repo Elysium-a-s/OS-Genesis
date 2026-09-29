@@ -129,6 +129,7 @@ impl Ledger {
                ON command_events(command_id, sequence);",
         )?;
         connection.execute_batch(crate::grant::SCHEMA)?;
+        crate::grant::migrate(&connection)?;
         Ok(Self { connection })
     }
 
