@@ -1,0 +1,36 @@
+name: Build Genesis core
+
+on:
+  pull_request:
+    paths:
+      - 'core/**'
+      - '.github/workflows/core.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'core/**'
+      - '.github/workflows/core.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        run: rustup update stable
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Build
+        run: cargo build
+      - name: Test
+        run: cargo test
+      - name: Check Linux ARM64 target
+        run: |
+          rustup target add aarch64-unknown-linux-gnu
+          cargo check --target aarch64-unknown-linux-gnu
