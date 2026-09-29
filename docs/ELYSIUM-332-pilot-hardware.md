@@ -20,9 +20,9 @@ Používateľ potvrdil **Home Assistant Green**. Nižšie sú výrobné parametr
 | Úložisko | 32 GB eMMC | Špecifikácia výrobcu; voľné miesto konkrétnej jednotky neznáme |
 | Sieť | Gigabit Ethernet | Špecifikácia výrobcu; konfigurácia siete konkrétnej jednotky neznáma |
 | USB | 2 × USB 2.0 Type-A | Špecifikácia výrobcu; pripojené rádiá/dongle neznáme |
-| Inštalačný typ | Home Assistant OS predinštalovaný z výroby | Špecifikácia produktu; aktuálnu inštaláciu potvrdiť v System information |
-| HA Core verzia | **Neoverené** | Doplniť zo System information |
-| HA OS verzia | **Neoverené** | Doplniť zo System information |
+| Inštalačný typ | Home Assistant OS | Potvrdené používateľovým screenshotom: OS 18.3 |
+| HA Core verzia | **2026.9.4** | Potvrdené používateľovým screenshotom z 2026-09-29 |
+| HA OS verzia | **18.3** | Potvrdené používateľovým screenshotom z 2026-09-29 |
 | Supervisor verzia | **Neoverené** | Doplniť zo System information |
 | Voľná RAM / úložisko | **Neoverené** | Zmerať pred nasadením a po spustení Genesis |
 
@@ -30,14 +30,14 @@ Zdroj parametrov: [Home Assistant Green](https://www.home-assistant.io/green). P
 
 ## 2. Prvé fyzické zariadenie
 
-**Zatiaľ nevybrané.** Nepredpokladať existenciu konkrétneho zariadenia v používateľovej domácnosti.
+**Plánované zariadenie: Wi‑Fi žiarovka.** Používateľ uviedol, že ešte nie je pripojená. Presný model nie je známy, preto nie je možné deklarovať fyzickú podporu alebo výsledok príkazu.
 
 | Povinný údaj | Hodnota |
 | --- | --- |
-| Kategória (svetlo alebo zásuvka) | Čaká na výber |
+| Kategória (svetlo alebo zásuvka) | Wi‑Fi žiarovka, plánovaná |
 | Výrobca a presný model | Čaká na výber |
 | HA integrácia / entity ID | Čaká na overenie; do verejných dokumentov nevkladať citlivé identifikátory |
-| Cesta spojenia (Wi‑Fi, Ethernet, Zigbee, Matter, hub/cloud) | Čaká na overenie |
+| Cesta spojenia (Wi‑Fi, Ethernet, Zigbee, Matter, hub/cloud) | Wi‑Fi plánované; konkrétna HA integrácia neznáma |
 | Schopnosti pre pilot | Čítanie stavu; bezpečné zapnutie a vypnutie |
 | Potvrdenie výsledku | Zistiť, či HA poskytne čerstvý stav po povele; provider odpoveď sama osebe nie je fyzické potvrdenie |
 | Fyzický dôkaz | Test vykonať na skutočnom zariadení, nie iba v simulátore |
@@ -63,8 +63,10 @@ Požiadať vlastníka o hodnoty **Installation type, Core, Supervisor, Operating
 - [x] Model Green potvrdený používateľom.
 - [x] Výrobné CPU, RAM, eMMC a spôsob štandardnej inštalácie zdokumentované so zdrojom.
 - [x] Obmedzenia pre HA app a lokálny hlas zapísané ako návrh merania.
-- [ ] Skutočný typ inštalácie, architektúra a aktuálne verzie potvrdené z jednotky.
-- [ ] Vybrané fyzické svetlo alebo zásuvka vrátane modelu a cesty spojenia.
+- [x] Skutočný typ inštalácie a verzie HA Core/OS potvrdené screenshotom z jednotky.
+- [ ] Architektúra a verzia Supervisor potvrdené zo System information.
+- [x] Zvolená kategória a plánovaná cesta: Wi‑Fi žiarovka.
+- [ ] Presný model, HA integrácia a fyzické pripojenie potvrdené.
 - [ ] Priestor a voľná RAM zmerané alebo označené ako riziko pred nasadením.
 
 Story môže ísť do **In Review** po doplnení údajov z konkrétnej jednotky a výbere zariadenia; do **Done** až po schválení inventára. Následný výkonový a fyzický test patrí implementačným stories ELYSIUM-334, ELYSIUM-336 a ELYSIUM-338.
