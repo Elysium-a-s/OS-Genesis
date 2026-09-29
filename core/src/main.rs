@@ -67,7 +67,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::{to_bytes, Body}, http::{Request, StatusCode}};
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
     use tower::ServiceExt;
 
     #[test]
@@ -89,7 +92,12 @@ mod tests {
     #[tokio::test]
     async fn health_returns_json() {
         let response = app()
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
