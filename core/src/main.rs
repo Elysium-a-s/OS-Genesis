@@ -15,8 +15,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
-use uuid::Uuid;
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
 struct Config {
     bind_addr: SocketAddr,
@@ -39,7 +39,8 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("./genesis-ledger.sqlite3"));
         config.read_token = env::var("GENESIS_READ_TOKEN").ok();
         config.write_token = env::var("GENESIS_WRITE_TOKEN").ok();
-        config.household_id = env::var("GENESIS_HOUSEHOLD_ID").unwrap_or_else(|_| "pilot-home".to_owned());
+        config.household_id =
+            env::var("GENESIS_HOUSEHOLD_ID").unwrap_or_else(|_| "pilot-home".to_owned());
         if config
             .read_token
             .as_ref()
@@ -47,7 +48,11 @@ impl Config {
         {
             return Err("GENESIS_READ_TOKEN must have at least 32 characters".to_owned());
         }
-        if config.write_token.as_ref().is_some_and(|token| token.len() < 32) {
+        if config
+            .write_token
+            .as_ref()
+            .is_some_and(|token| token.len() < 32)
+        {
             return Err("GENESIS_WRITE_TOKEN must have at least 32 characters".to_owned());
         }
         if config.household_id.is_empty() || config.household_id.len() > 128 {
@@ -132,15 +137,25 @@ async fn create_command(
     if input.household_id != state.household_id {
         return Err(StatusCode::FORBIDDEN);
     }
-    let ha_config = state.ha_config.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let device = state.inventory.devices().await.into_iter()
+    let ha_config = state
+        .ha_config
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let device = state
+        .inventory
+        .devices()
+        .await
+        .into_iter()
         .find(|item| item.device_id == input.device_id)
         .ok_or(StatusCode::NOT_FOUND)?;
     if device.availability != Availability::Online || !device.writable {
         return Err(StatusCode::CONFLICT);
     }
     let command_id = format!("cmd:{}", Uuid::new_v4());
-    let actor = Actor { actor_type: ActorType::User, actor_id: "pilot-owner".to_owned() };
+    let actor = Actor {
+        actor_type: ActorType::User,
+        actor_id: "pilot-owner".to_owned(),
+    };
     let request = CommandRequest {
         household_id: input.household_id,
         command_id: command_id.clone(),
@@ -157,8 +172,15 @@ async fn create_command(
         return Ok(Json(snapshot));
     }
     let result = ha_command::execute(
-        ha_config, &device, input.value, &mut ledger, &command_id, actor,
-    ).await.map_err(map_ledger_error)?;
+        ha_config,
+        &device,
+        input.value,
+        &mut ledger,
+        &command_id,
+        actor,
+    )
+    .await
+    .map_err(map_ledger_error)?;
     Ok(Json(result))
 }
 
@@ -169,7 +191,9 @@ async fn get_command(
 ) -> Result<Json<Snapshot>, StatusCode> {
     authorize(&headers, state.read_token.as_deref())?;
     let ledger = state.ledger.lock().await;
-    let snapshot = ledger.get(&command_id).map_err(map_ledger_error)?
+    let snapshot = ledger
+        .get(&command_id)
+        .map_err(map_ledger_error)?
         .ok_or(StatusCode::NOT_FOUND)?;
     if snapshot.request.household_id != state.household_id {
         return Err(StatusCode::NOT_FOUND);
@@ -298,14 +322,14 @@ mod tests {
     #[tokio::test]
     async fn health_returns_json() {
         let response = app(test_state(None))
-        .oneshot(
-            Request::builder()
-                .uri("/health")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "application/json");
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
