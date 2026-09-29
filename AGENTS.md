@@ -1,6 +1,6 @@
-# C-C-OS-CU — agent instructions
+# OS Genesis — agent instructions
 
-Central-unit OS repository; currently contains only a project README.
+Genesis je v štádiu úvodnej dokumentačnej kostry. Adresáre `core/`, `adapters/`, `panel/`, `ha-app/`, `contracts/`, `docs/` a `tests/` zatiaľ obsahujú len README; funkčný runtime a build systém ešte neexistujú.
 
 ## Working method
 - Search filenames/symbols first; read targeted ranges.
@@ -17,7 +17,7 @@ Central-unit OS repository; currently contains only a project README.
 - Broaden checks for affected boundaries/failures; reuse valid results.
 - Instructions-only edits: validate links, skill metadata and whitespace.
 - Separate review, tests, build, deployment and real-device evidence.
-- Use a scoped branch/PR per repo; preserve the exact Jira key.
+- Use a scoped branch/PR per repo; preserve the exact Jira key when one is assigned.
 - Assigned Jira implementation: In Progress before work; In Review after PR.
 - Jira Done requires merge and required release evidence.
 - Keep credentials, signing material and private data out of logs/commits.
@@ -26,9 +26,10 @@ Central-unit OS repository; currently contains only a project README.
 - Inspect the current tree before choosing implementation conventions.
 - No runtime, build system or repeatable technical workflow is established yet.
 - Do not infer a platform or copy backend/mobile deployment assumptions here.
+- Treat the architecture and languages in README as a starting proposal until validated on pilot hardware.
 
 ## On-demand references
 - Project scope: [README](README.md).
-- Add architecture under `docs/` when implementation establishes it.
+- Add implementation architecture under `docs/` when implementation establishes it.
 - Add a narrowly named `.agents/skills/<workflow>/SKILL.md` only for a real repeated workflow.
 - Until then, validate documentation links and whitespace; do not claim runtime tests.
