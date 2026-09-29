@@ -1,0 +1,7 @@
+{
+  "schema_version": "1.0",
+  "household_id": "home:demo",
+  "kind": "household",
+  "name": "Demo domácnosť",
+  "time_zone": "Europe/Bratislava"
+}
