@@ -3,7 +3,7 @@ FROM --platform=$BUILDPLATFORM rust:1.98.1-bookworm AS builder
 
 RUN rustup target add aarch64-unknown-linux-gnu \
     && apt-get update \
-    && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu \
+    && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
@@ -13,7 +13,7 @@ WORKDIR /source
 COPY core/ ./core/
 RUN cd core && cargo build --release --target aarch64-unknown-linux-gnu
 
-FROM --platform=$TARGETPLATFORM debian:bookworm-slim
+FROM debian:bookworm-slim
 
 ARG BUILD_VERSION=0.1.0
 RUN apt-get update \
