@@ -245,6 +245,66 @@ async fn send_json(socket: &mut Socket, value: Value) -> Result<(), ()> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn service_ack_and_correlated_event_confirm_device() {
+        use crate::ledger::{ActorType, CommandRequest};
+        use crate::ha::Availability;
+        use tokio_tungstenite::accept_async;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            socket.send(Message::Text(json!({"type":"auth_required"}).to_string().into())).await.unwrap();
+            let auth = socket.next().await.unwrap().unwrap();
+            assert_eq!(serde_json::from_str::<Value>(auth.to_text().unwrap()).unwrap()["type"], "auth");
+            socket.send(Message::Text(json!({"type":"auth_ok"}).to_string().into())).await.unwrap();
+            let sub = socket.next().await.unwrap().unwrap();
+            assert_eq!(serde_json::from_str::<Value>(sub.to_text().unwrap()).unwrap()["type"], "subscribe_events");
+            socket.send(Message::Text(json!({"id":1,"type":"result","success":true}).to_string().into())).await.unwrap();
+            let command = socket.next().await.unwrap().unwrap();
+            let command: Value = serde_json::from_str(command.to_text().unwrap()).unwrap();
+            assert_eq!(command["type"], "call_service");
+            assert_eq!(command["domain"], "light");
+            assert_eq!(command["service"], "turn_on");
+            assert_eq!(command["target"]["entity_id"], "light.living");
+            socket.send(Message::Text(json!({"id":1,"type":"event","event":{"context":{"id":"ctx-1"},"data":{"entity_id":"light.living","new_state":{"state":"on"}}}}).to_string().into())).await.unwrap();
+            socket.send(Message::Text(json!({"id":2,"type":"result","success":true,"result":{"context":{"id":"ctx-1"},"response":null}}).to_string().into())).await.unwrap();
+        });
+        let actor = Actor { actor_type: ActorType::User, actor_id: "pilot-owner".into() };
+        let mut ledger = Ledger::open(":memory:").unwrap();
+        ledger.accept(CommandRequest {
+            household_id: "pilot-home".into(),
+            command_id: "cmd-1".into(),
+            device_id: "ha:light.living".into(),
+            capability_id: "power".into(),
+            value: Value::Bool(true),
+            actor: actor.clone(),
+            idempotency_key: "idem-1".into(),
+            correlation_id: "corr-1".into(),
+        }).unwrap();
+        let device = Device {
+            device_id: "ha:light.living".into(),
+            provider: "home_assistant",
+            provider_device_ref: "light.living".into(),
+            name: "Living".into(),
+            capability_id: "power",
+            capability_type: "switch",
+            writable: true,
+            power: Some(false),
+            availability: Availability::Online,
+        };
+        let config = HaConfig {
+            websocket_url: format!("ws://{address}/api/websocket"),
+            token: "test-secret".into(),
+        };
+        let snapshot = execute(&config, &device, true, &mut ledger, "cmd-1", actor).await.unwrap();
+        assert_eq!(snapshot.status, Status::DeviceConfirmed);
+        assert_eq!(ledger.events("cmd-1").unwrap().len(), 4);
+        server.await.unwrap();
+    }
+
     #[test]
     fn only_matching_entity_and_value_count_as_observation() {
         let event = json!({"type":"event","id":1,"event":{"data":{"entity_id":"light.living","new_state":{"state":"on"}},"context":{"id":"ctx-1"}}});
