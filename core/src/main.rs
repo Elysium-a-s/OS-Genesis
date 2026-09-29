@@ -8,6 +8,7 @@ use axum::{
 };
 use chrono::Utc;
 use genesis_core::{
+    grant::{self, AccessState},
     ha::{self, Availability, HaConfig, Inventory},
     ha_command,
     ledger::{Actor, ActorType, CommandRequest, Ledger, LedgerError, Snapshot},
@@ -140,6 +141,7 @@ fn app(state: AppState) -> Router {
         .route("/v1/devices", get(devices))
         .route("/v1/commands", axum::routing::post(create_command))
         .route("/v1/commands/{command_id}", get(get_command))
+        .route("/v1/access", get(access))
         .with_state(state)
 }
 
@@ -200,6 +202,24 @@ async fn me(
     headers: HeaderMap,
 ) -> Result<Json<Principal>, StatusCode> {
     Ok(Json(principal(&headers, &state)?))
+}
+
+/// Posledný potvrdený stav a otvorené incidenty časovo obmedzených grantov.
+///
+/// Prehľad je iba na čítanie, takže stačí ktorýkoľvek platný token; zosúladenie
+/// beží v plánovači, nie z tejto požiadavky.
+async fn access(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AccessState>>, StatusCode> {
+    principal(&headers, &state)?;
+    let ledger = state.ledger.lock().await;
+    grant::overview(&ledger, &state.household_id)
+        .map(Json)
+        .map_err(|error| {
+            tracing::error!(%error, "reading the timed access overview failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
 }
 
 async fn create_command(
@@ -296,27 +316,28 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 /// Grant sa musí vrátiť späť aj vtedy, keď v čase expirácie nikto nevolá API,
-/// takže relock beží z vlastného plánovača. Tik určuje, o koľko neskôr než
-/// `expires_at` sa zariadenie zamkne; pilot beží s jednou domácnosťou, takže
-/// prechod drží zámok ledgeru rovnako ako obsluha povelu.
-const RELOCK_TICK: Duration = Duration::from_secs(30);
+/// takže zosúladenie beží z vlastného plánovača. Tik určuje, o koľko neskôr než
+/// `expires_at` sa zariadenie zamkne a ako často sa skúša neistý relock; pilot
+/// beží s jednou domácnosťou, takže prechod drží zámok ledgeru rovnako ako
+/// obsluha povelu.
+const RECONCILE_TICK: Duration = Duration::from_secs(30);
 
-async fn relock_sweeper(config: HaConfig, inventory: Inventory, ledger: Arc<Mutex<Ledger>>) {
-    let mut ticker = tokio::time::interval(RELOCK_TICK);
+async fn reconcile_sweeper(config: HaConfig, inventory: Inventory, ledger: Arc<Mutex<Ledger>>) {
+    let mut ticker = tokio::time::interval(RECONCILE_TICK);
     loop {
         ticker.tick().await;
         let mut ledger = ledger.lock().await;
-        match ha_command::relock_expired(&config, &inventory, &mut ledger, Utc::now()).await {
+        match ha_command::reconcile(&config, &inventory, &mut ledger, Utc::now()).await {
             Ok(settled) => {
                 for grant in settled {
                     tracing::info!(
                         decision_id = %grant.decision_id,
                         state = ?grant.state,
-                        "timed access relock settled"
+                        "timed access reconciled"
                     );
                 }
             }
-            Err(error) => tracing::warn!(%error, "relock sweep failed"),
+            Err(error) => tracing::warn!(%error, "reconciliation pass failed"),
         }
     }
 }
@@ -330,11 +351,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(config.log_filter)
         .init();
 
+    // Po štarte nie je nič na ceste: prerušené povely sa priznajú ako neznáme a
+    // grant sa radšej považuje za otvorený, než by zostal bez zámku. Beží to aj
+    // bez Home Assistanta, pretože samo nič neposiela.
+    for resumed in grant::resume(&mut *ledger.lock().await, Utc::now())? {
+        tracing::warn!(
+            decision_id = %resumed.decision_id,
+            state = ?resumed.state,
+            "timed access resumed after a restart"
+        );
+    }
+
     let inventory = Inventory::new();
     let ha_config = HaConfig::from_env().map_err(std::io::Error::other)?;
     if let Some(ha_config) = ha_config.clone() {
         tokio::spawn(ha::run(ha_config.clone(), inventory.clone()));
-        tokio::spawn(relock_sweeper(
+        tokio::spawn(reconcile_sweeper(
             ha_config,
             inventory.clone(),
             Arc::clone(&ledger),
@@ -374,6 +406,7 @@ mod tests {
         body::{to_bytes, Body},
         http::{Request, StatusCode},
     };
+    use genesis_core::behavior_decision::BehaviorDecision;
     use tower::ServiceExt;
 
     fn test_state(read_token: Option<String>) -> AppState {
@@ -538,6 +571,74 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Otvorí grant priamo v ledgeri stavu, aby prehľad mal čo ukázať.
+    async fn seed_grant(state: &AppState) -> String {
+        let decision = BehaviorDecision::parse(
+            &serde_json::json!({
+                "schema_version": "1.0",
+                "decision_id": "ff77bdb0-70af-4f2a-a913-76609b66761b",
+                "issuer": "behavior-engine",
+                "household_id": "pilot-home",
+                "central_unit_id": "ad19a578-21e2-453f-a57c-1913350be34e",
+                "subject_id": "64582f6b-38a5-48dd-9ed4-ae02949c7740",
+                "device_id": "ha:light.living",
+                "capability_id": "power",
+                "requested_value": true,
+                "operation": "apply",
+                "valid_from": "2026-09-29T18:00:00Z",
+                "expires_at": "2026-09-29T19:00:00Z",
+                "reason_code": "goal_verified",
+                "idempotency_key": "behavior:ff77bdb0",
+                "required_confirmation": "device"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-29T18:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut ledger = state.ledger.lock().await;
+        grant::open(&mut ledger, &decision, now)
+            .unwrap()
+            .decision_id
+    }
+
+    #[tokio::test]
+    async fn access_overview_needs_a_token_and_shows_the_grant() {
+        let state = test_state(Some("a".repeat(32)));
+        let decision_id = seed_grant(&state).await;
+        let unauthorized = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/access")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/access")
+                    .header("authorization", format!("Bearer {}", "a".repeat(32)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let overview: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(overview[0]["grant"]["decision_id"], decision_id);
+        assert_eq!(overview[0]["grant"]["state"], "granted");
+        assert_eq!(overview[0]["required_confirmation"], "device");
+        assert_eq!(overview[0]["close_attempts"], 0);
+        assert!(overview[0]["last_confirmed"].is_null());
+        assert_eq!(overview[0]["open_incidents"], serde_json::json!([]));
     }
 
     #[tokio::test]

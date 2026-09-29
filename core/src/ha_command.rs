@@ -7,7 +7,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::{
     behavior_decision::BehaviorDecision,
-    grant::{self, Grant, GrantError, GrantState},
+    grant::{self, Grant, GrantError, GrantState, RelockStep},
     ha::{Availability, Device, HaConfig, Inventory},
     ledger::{Actor, ActorType, Evidence, EvidenceKind, Ledger, LedgerError, Snapshot, Status},
 };
@@ -267,40 +267,120 @@ pub async fn apply_decision(
         &grant.unlock_command_id,
     )
     .await?;
-    grant::settle_unlock(ledger, &grant.decision_id, &outcome)
+    grant::settle_unlock(ledger, &grant.decision_id, &outcome, now)
 }
 
-/// Jeden prechod plánovača: vráti späť všetko, čomu vypršalo okno.
+/// Uzavrie prístup na základe rozhodnutia `revert`: zmazaný cieľ alebo override.
 ///
-/// Zariadenie, ktoré nie je online a zapisovateľné, sa nedá vrátiť späť, takže
-/// relock skončí ako neistý — a teda ako `relock_pending` s incidentom.
-pub async fn relock_expired(
+/// Jeden povel uzatvára všetky granty, ktoré na danom zariadení a schopnosti
+/// ešte môžu byť otvorené. Prázdny výsledok znamená, že Genesis na tom
+/// zariadení nemá čo uzavrieť.
+pub async fn withdraw_decision(
+    config: &HaConfig,
+    inventory: &Inventory,
+    ledger: &mut Ledger,
+    decision: &BehaviorDecision,
+    now: DateTime<Utc>,
+) -> Result<Vec<Grant>, GrantError> {
+    let Some(withdrawal) = grant::begin_withdrawal(ledger, decision, now)? else {
+        return Ok(Vec::new());
+    };
+    let outcome = if withdrawal.accepted.status == Status::Accepted {
+        drive(
+            config,
+            inventory,
+            ledger,
+            &withdrawal.device_id,
+            withdrawal.value,
+            &withdrawal.command_id,
+        )
+        .await?
+    } else {
+        withdrawal.accepted.clone()
+    };
+    grant::settle_withdrawal(ledger, &withdrawal, &outcome, now)
+}
+
+/// Jeden prechod zosúladenia fyzického stavu.
+///
+/// Splatné granty aj neisté relocky idú tou istou cestou; líšia sa len tým, čo
+/// ich do prechodu vybralo. Prechod najprv prevezme granty, ktoré zostali bez
+/// výsledku, takže rovnaký kód dorovnáva stav po reštarte aj po chybe za behu.
+pub async fn reconcile(
     config: &HaConfig,
     inventory: &Inventory,
     ledger: &mut Ledger,
     now: DateTime<Utc>,
 ) -> Result<Vec<Grant>, GrantError> {
-    let mut settled = Vec::new();
-    for due in grant::due(ledger, now)? {
-        let accepted = grant::begin_relock(ledger, &due.decision_id)?;
-        // Ak predchádzajúci prechod spadol až po odoslaní, povel je už uzavretý
-        // a druhýkrát sa neposiela; iba sa dopíše výsledok.
-        let outcome = if accepted.status == Status::Accepted {
-            drive(
-                config,
-                inventory,
-                ledger,
-                &due.device_id,
-                !due.granted_value,
-                &accepted.request.command_id,
-            )
-            .await?
-        } else {
-            accepted
-        };
-        settled.push(grant::settle_relock(ledger, &due.decision_id, &outcome)?);
+    // Povel sa odosiela iba pod zámkom ledgeru, ktorý tento prechod drží, takže
+    // čokoľvek bez výsledku ho už nedostane. Prevzatie tu zachytí aj grant,
+    // ktorý zostal otvorený pre chybu medzi prijatím unlocku a jeho výsledkom.
+    let mut settled = grant::resume(ledger, now)?;
+    let mut queue = grant::due(ledger, now)?;
+    queue.extend(grant::pending(ledger)?);
+    for grant in queue {
+        if let Some(closed) = close_grant(config, inventory, ledger, &grant, now).await? {
+            settled.push(closed);
+        }
     }
     Ok(settled)
+}
+
+/// Uzavretie jedného grantu. `None` znamená, že sa v tomto prechode nič
+/// nezmenilo a grant čaká ďalej.
+async fn close_grant(
+    config: &HaConfig,
+    inventory: &Inventory,
+    ledger: &mut Ledger,
+    grant: &Grant,
+    now: DateTime<Utc>,
+) -> Result<Option<Grant>, GrantError> {
+    let closing = grant.closing_value();
+    // Prvé uzavretie sa zapíše vždy, aj keď zariadenie nie je dostupné — inak by
+    // o možnom otvorenom prístupe nič nesvedčilo. Opakovaný pokus na nedostupné
+    // zariadenie by pridal len ďalšie zlyhanie, takže sa neposiela a pokus sa
+    // nepočíta; incident zostáva otvorený.
+    if grant.state == GrantState::RelockPending
+        && writable_device(inventory, &grant.device_id).await.is_none()
+    {
+        return Ok(None);
+    }
+    // Pozorovanie je lacnejšie aj bezpečnejšie než ďalší povel: keď zariadenie
+    // už vidíme v uzatváracej hodnote, výsledok zosúladí dôkaz.
+    if let Some(observed_at) = observed_value(inventory, &grant.device_id, closing).await {
+        if let Some(closed) =
+            grant::close_from_observation(ledger, &grant.decision_id, &observed_at, now)?
+        {
+            return Ok(Some(closed));
+        }
+    }
+    match grant::begin_relock(ledger, &grant.decision_id, now)? {
+        RelockStep::Settled(settled) => Ok(Some(settled)),
+        RelockStep::Wait(_) => Ok(None),
+        RelockStep::Send(accepted) => {
+            // Ak predchádzajúci prechod spadol až po odoslaní, povel je už
+            // uzavretý a druhýkrát sa neposiela; iba sa dopíše výsledok.
+            let outcome = if accepted.status == Status::Accepted {
+                drive(
+                    config,
+                    inventory,
+                    ledger,
+                    &grant.device_id,
+                    closing,
+                    &accepted.request.command_id,
+                )
+                .await?
+            } else {
+                accepted
+            };
+            Ok(Some(grant::settle_relock(
+                ledger,
+                &grant.decision_id,
+                &outcome,
+                now,
+            )?))
+        }
+    }
 }
 
 async fn drive(
@@ -313,7 +393,7 @@ async fn drive(
 ) -> Result<Snapshot, LedgerError> {
     let actor = Actor {
         actor_type: ActorType::Automation,
-        actor_id: "behavior-engine".to_owned(),
+        actor_id: "genesis-core".to_owned(),
     };
     match writable_device(inventory, device_id).await {
         Some(device) => execute(config, &device, desired, ledger, command_id, actor).await,
@@ -333,6 +413,20 @@ async fn writable_device(inventory: &Inventory, device_id: &str) -> Option<Devic
             && device.writable
             && device.availability == Availability::Online
     })
+}
+
+/// Čas pozorovania, ak inventár vidí zariadenie online v danej hodnote.
+async fn observed_value(inventory: &Inventory, device_id: &str, value: bool) -> Option<String> {
+    inventory
+        .devices()
+        .await
+        .into_iter()
+        .find(|device| {
+            device.device_id == device_id
+                && device.availability == Availability::Online
+                && device.power == Some(value)
+        })
+        .and_then(|device| device.observed_at)
 }
 
 #[cfg(test)]
@@ -437,23 +531,39 @@ mod tests {
         assert_eq!(event_context(&event), Some("ctx-1"));
     }
 
+    const AFTER_EXPIRY: &str = "2026-09-29T19:30:00Z";
+
     fn timed_decision() -> BehaviorDecision {
+        decision(
+            "apply",
+            true,
+            "behavior:ff77bdb0",
+            "ff77bdb0-70af-4f2a-a913-76609b66761b",
+        )
+    }
+
+    fn decision(
+        operation: &str,
+        requested_value: bool,
+        key: &str,
+        decision_id: &str,
+    ) -> BehaviorDecision {
         BehaviorDecision::parse(
             &json!({
                 "schema_version": "1.0",
-                "decision_id": "ff77bdb0-70af-4f2a-a913-76609b66761b",
+                "decision_id": decision_id,
                 "issuer": "behavior-engine",
                 "household_id": "pilot-home",
                 "central_unit_id": "ad19a578-21e2-453f-a57c-1913350be34e",
                 "subject_id": "64582f6b-38a5-48dd-9ed4-ae02949c7740",
                 "device_id": "ha:light.living",
                 "capability_id": "power",
-                "requested_value": true,
-                "operation": "apply",
+                "requested_value": requested_value,
+                "operation": operation,
                 "valid_from": "2026-09-29T18:00:00Z",
                 "expires_at": "2026-09-29T19:00:00Z",
                 "reason_code": "goal_verified",
-                "idempotency_key": "behavior:ff77bdb0",
+                "idempotency_key": key,
                 "required_confirmation": "device"
             })
             .to_string(),
@@ -476,32 +586,27 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_device_missing_from_the_inventory_fails_the_unlock() {
-        let mut ledger = Ledger::open(":memory:").unwrap();
-        let grant = apply_decision(
-            &unreachable(),
-            &Inventory::new(),
-            &mut ledger,
-            &timed_decision(),
-            moment("2026-09-29T18:30:00Z"),
-        )
-        .await
-        .unwrap();
-        assert_eq!(grant.state, GrantState::UnlockFailed);
-        assert!(!grant.unlock_confirmed);
-        // Nič nebolo odomknuté, takže plánovač nemá čo vracať späť.
-        assert!(grant::due(&ledger, moment("2026-09-29T19:30:00Z"))
-            .unwrap()
-            .is_empty());
+    /// Svetlo tak, ako ho vidí inventár po HA sedení.
+    fn light(power: bool, observed_at: &str) -> Device {
+        Device {
+            device_id: "ha:light.living".into(),
+            provider: "home_assistant",
+            provider_device_ref: "light.living".into(),
+            name: "Living".into(),
+            capability_id: "power",
+            capability_type: "switch",
+            writable: true,
+            power: Some(power),
+            observed_at: Some(observed_at.to_owned()),
+            availability: Availability::Online,
+        }
     }
 
-    #[tokio::test]
-    async fn a_device_offline_at_expiry_leaves_the_relock_pending_with_an_incident() {
-        let mut ledger = Ledger::open(":memory:").unwrap();
-        let decision = timed_decision();
-        let grant = grant::open(&mut ledger, &decision, moment("2026-09-29T18:30:00Z")).unwrap();
-
+    /// Odomkne grant a potvrdí unlock bez HA: testy zosúladenia potrebujú len
+    /// otvorený prístup ako vstup.
+    fn unlocked(ledger: &mut Ledger, decision: &BehaviorDecision) -> Grant {
+        let now = moment("2026-09-29T18:30:00Z");
+        let grant = grant::open(ledger, decision, now).unwrap();
         let actor = Actor {
             actor_type: ActorType::Automation,
             actor_id: "behavior-engine".to_owned(),
@@ -524,13 +629,82 @@ mod tests {
                 None,
             )
             .unwrap();
-        grant::settle_unlock(&mut ledger, &grant.decision_id, &unlocked).unwrap();
+        grant::settle_unlock(ledger, &grant.decision_id, &unlocked, now).unwrap()
+    }
 
-        let settled = relock_expired(
+    #[tokio::test]
+    async fn a_device_missing_from_the_inventory_fails_the_unlock() {
+        let mut ledger = Ledger::open(":memory:").unwrap();
+        let grant = apply_decision(
             &unreachable(),
             &Inventory::new(),
             &mut ledger,
-            moment("2026-09-29T19:30:00Z"),
+            &timed_decision(),
+            moment("2026-09-29T18:30:00Z"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(grant.state, GrantState::UnlockFailed);
+        assert!(!grant.unlock_confirmed);
+        // Nič nebolo odomknuté, takže zosúladenie nemá čo vracať späť.
+        assert!(grant::due(&ledger, moment(AFTER_EXPIRY))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_grant_left_without_a_result_is_taken_over_by_the_next_pass() {
+        let mut ledger = Ledger::open(":memory:").unwrap();
+        // Unlock bol prijatý, ale výsledok sa nikdy nezapísal — pád alebo chyba
+        // ledgeru medzi prijatím povelu a jeho výsledkom.
+        let grant = grant::open(
+            &mut ledger,
+            &timed_decision(),
+            moment("2026-09-29T18:30:00Z"),
+        )
+        .unwrap();
+        assert_eq!(grant.state, GrantState::Granted);
+
+        let settled = reconcile(
+            &unreachable(),
+            &Inventory::new(),
+            &mut ledger,
+            moment("2026-09-29T18:40:00Z"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].state, GrantState::Active);
+        assert!(!settled[0].unlock_confirmed);
+        let state = grant::access_state(&ledger, &grant.decision_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.open_incidents.len(), 1);
+        assert_eq!(state.open_incidents[0].kind, "result_lost");
+
+        // Taký grant sa pri expirácii zamyká ako každý iný.
+        let settled = reconcile(
+            &unreachable(),
+            &Inventory::new(),
+            &mut ledger,
+            moment(AFTER_EXPIRY),
+        )
+        .await
+        .unwrap();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].state, GrantState::RelockPending);
+    }
+
+    #[tokio::test]
+    async fn a_device_offline_at_expiry_leaves_the_relock_pending_with_an_incident() {
+        let mut ledger = Ledger::open(":memory:").unwrap();
+        let grant = unlocked(&mut ledger, &timed_decision());
+
+        let settled = reconcile(
+            &unreachable(),
+            &Inventory::new(),
+            &mut ledger,
+            moment(AFTER_EXPIRY),
         )
         .await
         .unwrap();
@@ -541,19 +715,125 @@ mod tests {
         assert_eq!(raised.len(), 1);
         assert_eq!(raised[0].kind, "relock_uncertain");
 
-        // Ďalší prechod plánovača už grant nevyberie ani nezaloží druhý incident.
-        assert!(relock_expired(
+        // Kým je zariadenie nedostupné, ďalší prechod neposiela nič, nespotrebuje
+        // pokus a nezaloží druhý incident.
+        assert!(reconcile(
             &unreachable(),
             &Inventory::new(),
             &mut ledger,
-            moment("2026-09-29T20:00:00Z"),
+            moment("2026-09-29T21:00:00Z"),
         )
         .await
         .unwrap()
         .is_empty());
+        let state = grant::access_state(&ledger, &grant.decision_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.close_attempts, 1);
+        assert_eq!(state.open_incidents.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_device_seen_in_the_closing_value_is_reconciled_without_another_command() {
+        let mut ledger = Ledger::open(":memory:").unwrap();
+        let grant = unlocked(&mut ledger, &timed_decision());
+        reconcile(
+            &unreachable(),
+            &Inventory::new(),
+            &mut ledger,
+            moment(AFTER_EXPIRY),
+        )
+        .await
+        .unwrap();
+
+        // Home Assistant sa vráti a hlási svetlo vypnuté. Grant sa uzavrie
+        // dôkazom, nie ďalším povelom, takže sa nikam nepripája.
+        let inventory = Inventory::new();
+        inventory
+            .seed(vec![light(false, "2026-09-29T19:35:00.500+00:00")])
+            .await;
+        let settled = reconcile(
+            &unreachable(),
+            &inventory,
+            &mut ledger,
+            moment("2026-09-29T19:40:00Z"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].state, GrantState::Relocked);
+
+        let state = grant::access_state(&ledger, &grant.decision_id)
+            .unwrap()
+            .unwrap();
+        assert!(state.open_incidents.is_empty());
+        let last = state.last_confirmed.unwrap();
+        assert_eq!(last.value, json!(false));
+        assert_eq!(last.confirmation, "device");
+
+        // Prvý povel skončil ako `failed` a z toho stavu ledger nikam nepustí,
+        // takže dôkaz nesie nový povel. Ten sa ale nikdy neodoslal: v jeho
+        // histórii nie je `sent`.
+        assert_eq!(state.close_attempts, 2);
+        let statuses: Vec<Status> = ledger
+            .events(&state.grant.relock_command_id.clone().unwrap())
+            .unwrap()
+            .into_iter()
+            .map(|event| event.status)
+            .collect();
         assert_eq!(
-            grant::incidents(&ledger, &grant.decision_id).unwrap().len(),
-            1
+            statuses,
+            [Status::Accepted, Status::Unknown, Status::DeviceConfirmed]
         );
+    }
+
+    #[tokio::test]
+    async fn a_deleted_goal_closes_the_grant_even_when_home_assistant_is_gone() {
+        let mut ledger = Ledger::open(":memory:").unwrap();
+        let grant = unlocked(&mut ledger, &timed_decision());
+        let cancel = decision(
+            "revert",
+            false,
+            "behavior:b0c3f0d1",
+            "b0c3f0d1-2f4a-4a53-9f7c-6ac1d1b2e3f4",
+        );
+
+        let settled = withdraw_decision(
+            &unreachable(),
+            &Inventory::new(),
+            &mut ledger,
+            &cancel,
+            moment("2026-09-29T18:40:00Z"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(settled.len(), 1);
+        // Zariadenie sa nedalo osloviť, takže prístup nie je preukázateľne
+        // zatvorený; stav to priznáva a incident zostáva otvorený.
+        assert_eq!(settled[0].state, GrantState::RelockPending);
+        let state = grant::access_state(&ledger, &grant.decision_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.open_incidents.len(), 1);
+        // Zrušený grant už nie je splatný pri expirácii.
+        assert!(grant::due(&ledger, moment(AFTER_EXPIRY))
+            .unwrap()
+            .is_empty());
+
+        // Keď sa svetlo ukáže vypnuté, zosúladenie grant uzavrie.
+        let inventory = Inventory::new();
+        inventory
+            .seed(vec![light(false, "2026-09-29T18:45:00+00:00")])
+            .await;
+        let settled = reconcile(
+            &unreachable(),
+            &inventory,
+            &mut ledger,
+            moment("2026-09-29T18:50:00Z"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].state, GrantState::Relocked);
     }
 }

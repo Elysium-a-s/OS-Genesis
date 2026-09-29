@@ -53,17 +53,47 @@ Ledger zatiaľ žiadny príkaz sám neodosiela a nemá HTTP endpoint. Idempotenc
 
 `core/src/grant.rs` vykoná rozhodnutie Behavior enginu ako dočasný unlock a pri expirácii ho vráti späť. Rozhodnutie musí prejsť kontraktom z `contracts/behavior/v1/decision.schema.json`; grant otvára iba operácia `apply` a iba vtedy, keď je okno `valid_from`–`expires_at` práve otvorené.
 
-Grant prechádza stavmi `granted` → `active` → `relocked`. Unlock aj relock idú cez ten istý execution ledger, takže platia rovnaké pravidlá dôkazov: `provider_confirmed` vyžaduje provider ack, `device_confirmed` pozorovanie zariadenia. Za potvrdený sa výsledok považuje až vtedy, keď dosiahne úroveň, ktorú rozhodnutie žiada v `required_confirmation`.
+Grant prechádza stavmi `granted` → `active` → `relocked`. Neisté uzavretie skončí v `relock_pending`, nevykonaný unlock v `unlock_failed` a grant, ktorého zariadenie drží novšie rozhodnutie, v `superseded`. Unlock aj relock idú cez ten istý execution ledger, takže platia rovnaké pravidlá dôkazov: `provider_confirmed` vyžaduje provider ack, `device_confirmed` pozorovanie zariadenia. Za potvrdený sa výsledok považuje až vtedy, keď dosiahne úroveň, ktorú rozhodnutie žiada v `required_confirmation`.
 
-Idempotencia je odvodená od rozhodnutia. Unlock používa `idempotency_key` z rozhodnutia, relock ten istý kľúč s príponou `:relock`; kľúč preto nesmie mať viac než 121 znakov. Opakované doručenie toho istého rozhodnutia vráti pôvodný grant a nevytvorí druhý povel, opakované zapísanie výsledku nič nemení.
+Idempotencia je odvodená od rozhodnutia. Unlock používa `idempotency_key` z rozhodnutia, uzavretie ten istý kľúč s príponou `:relock` a opakovaný pokus ešte s číslom pokusu (`:relock2`); kľúč preto nesmie mať viac než 120 znakov. Opakované doručenie toho istého rozhodnutia vráti pôvodný grant a nevytvorí druhý povel, opakované zapísanie výsledku nič nemení.
 
 Neistý unlock (`unknown`, alebo len provider ack tam, kde rozhodnutie žiada zariadenie) sa zámerne považuje za otvorený prístup a grant sa pri expirácii aj tak zamyká — relock navyše je bezpečnejší než odomknuté zariadenie. Naopak `failed` unlock sa nevykonal, takže stav prejde do `unlock_failed` a nič sa nevracia.
 
-Ak relock nedosiahne vyžadované potvrdenie, grant skončí v `relock_pending` a vznikne incident `relock_uncertain`. Incident má odvodené id, takže opakovaný rovnaký výsledok nezaloží druhý záznam. `relock_pending` je koncový stav tejto úlohy; automatické zosúladenie fyzického stavu patrí do ELYSIUM-344.
+Ak relock nedosiahne vyžadované potvrdenie, grant skončí v `relock_pending` a vznikne incident `relock_uncertain`. Incident má odvodené id, takže opakovaný rovnaký výsledok nezaloží druhý záznam. Odtiaľ pokračuje zosúladenie.
 
-Relock nespúšťa HTTP požiadavka. Ak sú nastavené HA premenné, core spustí plánovač, ktorý každých 30 sekúnd zamkne všetko po expirácii; tik teda určuje, o koľko neskôr než `expires_at` sa zariadenie zamkne. Zariadenie, ktoré v tej chvíli nie je online a zapisovateľné, skončí ako neistý relock s incidentom. Prechod drží zámok ledgeru rovnako ako obsluha povelu, čo pri pilotnej jednej domácnosti stačí.
+Relock nespúšťa HTTP požiadavka. Ak sú nastavené HA premenné, core spustí plánovač, ktorý každých 30 sekúnd zamkne všetko po expirácii a skúsi zosúladiť neisté relocky; tik teda určuje, o koľko neskôr než `expires_at` sa zariadenie zamkne. Prechod drží zámok ledgeru rovnako ako obsluha povelu, čo pri pilotnej jednej domácnosti stačí.
 
-Rozhodnutia zatiaľ nemajú HTTP endpoint ani inú prepravu — `apply_decision` volá zatiaľ len test. Fyzický cyklus initial lock → dôkaz → unlock → expirácia → relock treba overiť na Home Assistant Green; krížová kompilácia ani testy to nenahrádzajú.
+## Zosúladenie fyzického stavu
+
+`core/src/grant.rs` a `ha_command::reconcile` dorovnávajú fyzický stav po reštarte, strate Home Assistanta, zmazaní cieľa, override a expirácii. Celý modul berie čas ako parameter, nie zo systémových hodín, takže sa každý scenár dá odohrať v teste.
+
+**Reštart.** Pri štarte core zavolá `grant::resume`. Po štarte nie je nič na ceste, takže povel, ktorý zostal v `accepted` alebo `sent`, sa prizná ako `unknown` s dôvodom `interrupted_before_result` a vznikne incident `interrupted_by_restart`. Grant s prerušeným unlockom prechádza do `active`, teda medzi tie, ktoré treba pri expirácii zamknúť. Beží to aj bez HA premenných, pretože samo nič neposiela.
+
+**Strata Home Assistanta.** Prvé uzavretie sa zapíše vždy, aj keď zariadenie nie je dostupné — inak by o možnom otvorenom prístupe nič nesvedčilo. Opakovaný pokus na nedostupné zariadenie sa už neposiela a nepočíta sa medzi pokusy; incident zostáva otvorený, kým sa zariadenie neozve.
+
+**Pozorovanie namiesto povelu.** Keď inventár vidí zariadenie online v hodnote, ktorou sa prístup zatvára, grant sa uzavrie dôkazom a nepošle sa nič. To je aj jediná cesta, ako sa uzavrie relock zariadenia, ktoré už v čase expirácie bolo v správnej hodnote: HA v takom prípade nevydá `state_changed`, takže povel sám by skončil ako `unknown`.
+
+**Opakované pokusy.** Neistý relock sa skúša najviac päťkrát, prvý opakovaný pokus po minúte a každý ďalší po dvojnásobku predchádzajúceho. Každý pokus má vlastný povel aj idempotency kľúč. Po vyčerpaní limitu Genesis už nič neposiela a incident `relock_exhausted` zostáva otvorený pre človeka.
+
+**Zmazanie cieľa a override.** Rozhodnutie s `operation=revert` uzavrie prístup ešte pred expiráciou. Jeden povel uzatvára všetky granty, ktoré na danom zariadení a schopnosti môžu byť otvorené; revert bez otvoreného grantu nespraví nič. Override novším rozhodnutím na to isté zariadenie a hodnotu s dlhším oknom nechá starší grant prejsť do `superseded` — starší grant nesmie zamknúť zariadenie, ktoré novšie rozhodnutie legitímne drží, a novší grant má vlastnú expiráciu. Rozhodnutie, ktoré by na tom istom zariadení držalo protikladnú hodnotu, sa odmietne.
+
+Prehľad je na `GET /v1/access` s ktorýmkoľvek platným tokenom. Vracia stav grantu, `required_confirmation`, počet uzatváracích pokusov, posledný potvrdený stav (povel, hodnota, úroveň potvrdenia a čas dôkazu) a otvorené incidenty; odpoveď je ohraničená na 200 grantov domácnosti.
+
+### Bezpečnostné výnimky
+
+1. Zosúladenie posiela iba opak hodnoty, ktorú grant otvoril. Nikdy neodomyká — na odomknutie treba nové rozhodnutie `apply`.
+2. Neistý výsledok sa vždy počíta ako možný otvorený prístup. Chýbajúci dôkaz nie je dôkaz o zatvorení.
+3. Provider ack nenahradí potvrdenie zariadením tam, kde to rozhodnutie žiada, a to ani pri zosúladení.
+4. Opakovaný pokus sa neposiela na zariadenie, ktoré nie je online a zapisovateľné.
+5. Pokusy sú ohraničené. Genesis zariadenie nebombarduje; nezosúladený stav je vec človeka, nie ďalšieho pokusu.
+6. Pozorovanie z inventára sa prijíma ako dôkaz zariadenia, hoci nie je korelované s konkrétnym povelom: dokazuje fyzický stav, nie to, ktorý povel ho spôsobil. V audite to drží referencia `inventory:<čas>`. Povel, ktorý sa pri tom neodoslal, prechádza cez `unknown` s dôvodom `not_sent_device_already_in_the_closing_value`, pretože `sent` by bola lož.
+7. Revert smie prístup iba zatvoriť. Rozhodnutie, ktoré by obnovilo hodnotu otvorenú grantom, sa odmietne.
+8. Reštart nikdy nepovažuje prerušený povel za úspešný.
+9. Relock pri expirácii a zosúladenie vydáva aktér `genesis-core`, nie `behavior-engine`; withdraw nesie vydavateľa rozhodnutia. Audit má ukázať, kto povel skutočne vydal.
+
+### Limity
+
+Rozhodnutia zatiaľ nemajú HTTP endpoint ani inú prepravu — `apply_decision` a `withdraw_decision` volá zatiaľ len test. Ak sú pokusy vyčerpané a posledný uzatvárací povel skončil ako `failed`, pozorovanie grant neuzavrie, pretože ledger z `failed` nikam neprechádza; čaká človek. Revert doručený mimo vlastného okna je zamietnutý, grant sa potom zamkne až pri svojej expirácii. Fyzický cyklus initial lock → dôkaz → unlock → expirácia → relock → zosúladenie treba overiť na Home Assistant Green; krížová kompilácia ani testy to nenahrádzajú.
 
 ## Overenie
 

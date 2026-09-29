@@ -51,6 +51,16 @@ impl Inventory {
         }
     }
 
+    /// Naplní inventár priamo, bez HA sedenia. Potrebujú to testy zosúladenia
+    /// v `ha_command`, ktoré pracujú s pozorovaným stavom bez WebSocket servera.
+    #[cfg(test)]
+    pub(crate) async fn seed(&self, devices: Vec<Device>) {
+        *self.0.write().await = devices
+            .into_iter()
+            .map(|device| (device.device_id.clone(), device))
+            .collect();
+    }
+
     async fn mark_unknown(&self) {
         for device in self.0.write().await.values_mut() {
             device.availability = Availability::Unknown;
