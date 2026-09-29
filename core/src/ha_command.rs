@@ -1,13 +1,15 @@
 use std::time::Duration;
 
-use chrono::{SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::{
-    ha::{Device, HaConfig},
-    ledger::{Actor, Evidence, EvidenceKind, Ledger, LedgerError, Snapshot, Status},
+    behavior_decision::BehaviorDecision,
+    grant::{self, Grant, GrantError, GrantState},
+    ha::{Availability, Device, HaConfig, Inventory},
+    ledger::{Actor, ActorType, Evidence, EvidenceKind, Ledger, LedgerError, Snapshot, Status},
 };
 
 type Socket =
@@ -241,6 +243,98 @@ async fn send_json(socket: &mut Socket, value: Value) -> Result<(), ()> {
         .map_err(|_| ())
 }
 
+/// Vykoná rozhodnutie Behavior enginu ako časovo obmedzený unlock.
+///
+/// Opakované doručenie toho istého rozhodnutia nevytvorí druhý povel — grant aj
+/// ledger sú kľúčované idempotency kľúčom z rozhodnutia.
+pub async fn apply_decision(
+    config: &HaConfig,
+    inventory: &Inventory,
+    ledger: &mut Ledger,
+    decision: &BehaviorDecision,
+    now: DateTime<Utc>,
+) -> Result<Grant, GrantError> {
+    let grant = grant::open(ledger, decision, now)?;
+    if grant.state != GrantState::Granted {
+        return Ok(grant);
+    }
+    let outcome = drive(
+        config,
+        inventory,
+        ledger,
+        &grant.device_id,
+        grant.granted_value,
+        &grant.unlock_command_id,
+    )
+    .await?;
+    grant::settle_unlock(ledger, &grant.decision_id, &outcome)
+}
+
+/// Jeden prechod plánovača: vráti späť všetko, čomu vypršalo okno.
+///
+/// Zariadenie, ktoré nie je online a zapisovateľné, sa nedá vrátiť späť, takže
+/// relock skončí ako neistý — a teda ako `relock_pending` s incidentom.
+pub async fn relock_expired(
+    config: &HaConfig,
+    inventory: &Inventory,
+    ledger: &mut Ledger,
+    now: DateTime<Utc>,
+) -> Result<Vec<Grant>, GrantError> {
+    let mut settled = Vec::new();
+    for due in grant::due(ledger, now)? {
+        let accepted = grant::begin_relock(ledger, &due.decision_id)?;
+        // Ak predchádzajúci prechod spadol až po odoslaní, povel je už uzavretý
+        // a druhýkrát sa neposiela; iba sa dopíše výsledok.
+        let outcome = if accepted.status == Status::Accepted {
+            drive(
+                config,
+                inventory,
+                ledger,
+                &due.device_id,
+                !due.granted_value,
+                &accepted.request.command_id,
+            )
+            .await?
+        } else {
+            accepted
+        };
+        settled.push(grant::settle_relock(ledger, &due.decision_id, &outcome)?);
+    }
+    Ok(settled)
+}
+
+async fn drive(
+    config: &HaConfig,
+    inventory: &Inventory,
+    ledger: &mut Ledger,
+    device_id: &str,
+    desired: bool,
+    command_id: &str,
+) -> Result<Snapshot, LedgerError> {
+    let actor = Actor {
+        actor_type: ActorType::Automation,
+        actor_id: "behavior-engine".to_owned(),
+    };
+    match writable_device(inventory, device_id).await {
+        Some(device) => execute(config, &device, desired, ledger, command_id, actor).await,
+        None => ledger.transition(
+            command_id,
+            Status::Failed,
+            actor,
+            None,
+            Some("device_unavailable".to_owned()),
+        ),
+    }
+}
+
+async fn writable_device(inventory: &Inventory, device_id: &str) -> Option<Device> {
+    inventory.devices().await.into_iter().find(|device| {
+        device.device_id == device_id
+            && device.writable
+            && device.availability == Availability::Online
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +435,125 @@ mod tests {
         assert!(!matching_state_event(&event, "light.other", true));
         assert!(!matching_state_event(&event, "light.living", false));
         assert_eq!(event_context(&event), Some("ctx-1"));
+    }
+
+    fn timed_decision() -> BehaviorDecision {
+        BehaviorDecision::parse(
+            &json!({
+                "schema_version": "1.0",
+                "decision_id": "ff77bdb0-70af-4f2a-a913-76609b66761b",
+                "issuer": "behavior-engine",
+                "household_id": "pilot-home",
+                "central_unit_id": "ad19a578-21e2-453f-a57c-1913350be34e",
+                "subject_id": "64582f6b-38a5-48dd-9ed4-ae02949c7740",
+                "device_id": "ha:light.living",
+                "capability_id": "power",
+                "requested_value": true,
+                "operation": "apply",
+                "valid_from": "2026-09-29T18:00:00Z",
+                "expires_at": "2026-09-29T19:00:00Z",
+                "reason_code": "goal_verified",
+                "idempotency_key": "behavior:ff77bdb0",
+                "required_confirmation": "device"
+            })
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    fn moment(raw: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(raw)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    /// Adresa, na ktorej nikto nepočúva: keby sa test predsa len pokúsil
+    /// pripojiť, zlyhá rýchlo namiesto čakania na časový limit.
+    fn unreachable() -> HaConfig {
+        HaConfig {
+            websocket_url: "ws://127.0.0.1:1/api/websocket".to_owned(),
+            token: "unused".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_device_missing_from_the_inventory_fails_the_unlock() {
+        let mut ledger = Ledger::open(":memory:").unwrap();
+        let grant = apply_decision(
+            &unreachable(),
+            &Inventory::new(),
+            &mut ledger,
+            &timed_decision(),
+            moment("2026-09-29T18:30:00Z"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(grant.state, GrantState::UnlockFailed);
+        assert!(!grant.unlock_confirmed);
+        // Nič nebolo odomknuté, takže plánovač nemá čo vracať späť.
+        assert!(grant::due(&ledger, moment("2026-09-29T19:30:00Z"))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_device_offline_at_expiry_leaves_the_relock_pending_with_an_incident() {
+        let mut ledger = Ledger::open(":memory:").unwrap();
+        let decision = timed_decision();
+        let grant = grant::open(&mut ledger, &decision, moment("2026-09-29T18:30:00Z")).unwrap();
+
+        let actor = Actor {
+            actor_type: ActorType::Automation,
+            actor_id: "behavior-engine".to_owned(),
+        };
+        ledger
+            .transition(
+                &grant.unlock_command_id,
+                Status::Sent,
+                actor.clone(),
+                None,
+                None,
+            )
+            .unwrap();
+        let unlocked = ledger
+            .transition(
+                &grant.unlock_command_id,
+                Status::DeviceConfirmed,
+                actor,
+                Some(evidence(EvidenceKind::DeviceObservation, "obs-1")),
+                None,
+            )
+            .unwrap();
+        grant::settle_unlock(&mut ledger, &grant.decision_id, &unlocked).unwrap();
+
+        let settled = relock_expired(
+            &unreachable(),
+            &Inventory::new(),
+            &mut ledger,
+            moment("2026-09-29T19:30:00Z"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].state, GrantState::RelockPending);
+
+        let raised = grant::incidents(&ledger, &grant.decision_id).unwrap();
+        assert_eq!(raised.len(), 1);
+        assert_eq!(raised[0].kind, "relock_uncertain");
+
+        // Ďalší prechod plánovača už grant nevyberie ani nezaloží druhý incident.
+        assert!(relock_expired(
+            &unreachable(),
+            &Inventory::new(),
+            &mut ledger,
+            moment("2026-09-29T20:00:00Z"),
+        )
+        .await
+        .unwrap()
+        .is_empty());
+        assert_eq!(
+            grant::incidents(&ledger, &grant.decision_id).unwrap().len(),
+            1
+        );
     }
 }

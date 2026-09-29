@@ -49,6 +49,22 @@ Ak sú nastavené obe HA premenné, core sa autentifikuje cez WebSocket, načít
 
 Ledger zatiaľ žiadny príkaz sám neodosiela a nemá HTTP endpoint. Idempotencia bráni opakovanému prijatiu, ale sama o sebe nedokazuje presne jedno fyzické vykonanie u externého poskytovateľa. Adaptér musí pri neistom výsledku použiť `unknown` a pred prípadným ďalším pokusom overiť stav zariadenia.
 
+## Časovo obmedzený prístup
+
+`core/src/grant.rs` vykoná rozhodnutie Behavior enginu ako dočasný unlock a pri expirácii ho vráti späť. Rozhodnutie musí prejsť kontraktom z `contracts/behavior/v1/decision.schema.json`; grant otvára iba operácia `apply` a iba vtedy, keď je okno `valid_from`–`expires_at` práve otvorené.
+
+Grant prechádza stavmi `granted` → `active` → `relocked`. Unlock aj relock idú cez ten istý execution ledger, takže platia rovnaké pravidlá dôkazov: `provider_confirmed` vyžaduje provider ack, `device_confirmed` pozorovanie zariadenia. Za potvrdený sa výsledok považuje až vtedy, keď dosiahne úroveň, ktorú rozhodnutie žiada v `required_confirmation`.
+
+Idempotencia je odvodená od rozhodnutia. Unlock používa `idempotency_key` z rozhodnutia, relock ten istý kľúč s príponou `:relock`; kľúč preto nesmie mať viac než 121 znakov. Opakované doručenie toho istého rozhodnutia vráti pôvodný grant a nevytvorí druhý povel, opakované zapísanie výsledku nič nemení.
+
+Neistý unlock (`unknown`, alebo len provider ack tam, kde rozhodnutie žiada zariadenie) sa zámerne považuje za otvorený prístup a grant sa pri expirácii aj tak zamyká — relock navyše je bezpečnejší než odomknuté zariadenie. Naopak `failed` unlock sa nevykonal, takže stav prejde do `unlock_failed` a nič sa nevracia.
+
+Ak relock nedosiahne vyžadované potvrdenie, grant skončí v `relock_pending` a vznikne incident `relock_uncertain`. Incident má odvodené id, takže opakovaný rovnaký výsledok nezaloží druhý záznam. `relock_pending` je koncový stav tejto úlohy; automatické zosúladenie fyzického stavu patrí do ELYSIUM-344.
+
+Relock nespúšťa HTTP požiadavka. Ak sú nastavené HA premenné, core spustí plánovač, ktorý každých 30 sekúnd zamkne všetko po expirácii; tik teda určuje, o koľko neskôr než `expires_at` sa zariadenie zamkne. Zariadenie, ktoré v tej chvíli nie je online a zapisovateľné, skončí ako neistý relock s incidentom. Prechod drží zámok ledgeru rovnako ako obsluha povelu, čo pri pilotnej jednej domácnosti stačí.
+
+Rozhodnutia zatiaľ nemajú HTTP endpoint ani inú prepravu — `apply_decision` volá zatiaľ len test. Fyzický cyklus initial lock → dôkaz → unlock → expirácia → relock treba overiť na Home Assistant Green; krížová kompilácia ani testy to nenahrádzajú.
+
 ## Overenie
 
 ```sh
