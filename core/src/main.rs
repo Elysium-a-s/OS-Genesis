@@ -1,4 +1,4 @@
-use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     extract::{Path, State},
@@ -6,6 +6,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use chrono::Utc;
 use genesis_core::{
     ha::{self, Availability, HaConfig, Inventory},
     ha_command,
@@ -218,6 +219,32 @@ async fn health() -> Json<serde_json::Value> {
     }))
 }
 
+/// Grant sa musí vrátiť späť aj vtedy, keď v čase expirácie nikto nevolá API,
+/// takže relock beží z vlastného plánovača. Tik určuje, o koľko neskôr než
+/// `expires_at` sa zariadenie zamkne; pilot beží s jednou domácnosťou, takže
+/// prechod drží zámok ledgeru rovnako ako obsluha povelu.
+const RELOCK_TICK: Duration = Duration::from_secs(30);
+
+async fn relock_sweeper(config: HaConfig, inventory: Inventory, ledger: Arc<Mutex<Ledger>>) {
+    let mut ticker = tokio::time::interval(RELOCK_TICK);
+    loop {
+        ticker.tick().await;
+        let mut ledger = ledger.lock().await;
+        match ha_command::relock_expired(&config, &inventory, &mut ledger, Utc::now()).await {
+            Ok(settled) => {
+                for grant in settled {
+                    tracing::info!(
+                        decision_id = %grant.decision_id,
+                        state = ?grant.state,
+                        "timed access relock settled"
+                    );
+                }
+            }
+            Err(error) => tracing::warn!(%error, "relock sweep failed"),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
@@ -230,7 +257,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let inventory = Inventory::new();
     let ha_config = HaConfig::from_env().map_err(std::io::Error::other)?;
     if let Some(ha_config) = ha_config.clone() {
-        tokio::spawn(ha::run(ha_config, inventory.clone()));
+        tokio::spawn(ha::run(ha_config.clone(), inventory.clone()));
+        tokio::spawn(relock_sweeper(
+            ha_config,
+            inventory.clone(),
+            Arc::clone(&ledger),
+        ));
     }
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     tracing::info!(address = %listener.local_addr()?, "Genesis core listening");

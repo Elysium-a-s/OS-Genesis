@@ -128,7 +128,14 @@ impl Ledger {
              CREATE INDEX IF NOT EXISTS command_events_by_command
                ON command_events(command_id, sequence);",
         )?;
+        connection.execute_batch(crate::grant::SCHEMA)?;
         Ok(Self { connection })
+    }
+
+    /// Časovo obmedzené granty žijú v tej istej databáze ako povely, na ktoré sa
+    /// odvolávajú; `grant` si cez tento prístup drží vlastnú schému u seba.
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.connection
     }
 
     pub fn accept(&mut self, request: CommandRequest) -> Result<Snapshot, LedgerError> {
