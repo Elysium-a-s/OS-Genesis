@@ -2,7 +2,7 @@
 
 OS Genesis je pripravovaný systém centrálnej jednotky a kontrolného centra Elysium. Prvý pilot bude bežať vedľa existujúceho Home Assistantu na jeho hardvéri. Home Assistant poskytne zariadenia a ich udalosti; Genesis vytvorí vlastný model zariadení, vykonávanie príkazov a rozhranie pre panely a Elysium Behavior.
 
-> Stav: v1 kontrakt a Rust core s health endpointom a interným SQLite execution ledgerom. Integrácia zariadení, panel a inštalovateľný balík ešte nie sú hotové.
+> Stav: v1 kontrakt, Rust core s execution ledgerom a HA WebSocket adaptér pre svetlá a zásuvky. Fyzické overenie zariadenia, panel a inštalovateľný balík ešte nie sú hotové.
 
 ## Prvý overiteľný cieľ
 
@@ -20,7 +20,7 @@ Genesis načíta jedno skutočné svetlo z Home Assistantu, zobrazí jeho stav n
 | `docs/` | Architektúra, rozhodnutia a prevádzkové návody |
 | `tests/` | End-to-end scenáre a dôkazy z fyzických zariadení |
 
-V `contracts/` je implementovaná a testovaná prvá verzia wire kontraktu. `core/` obsahuje spustiteľnú Rust službu s health endpointom a interným execution ledgerom. Adaptér, panel a HA app zatiaľ neobsahujú funkčný runtime.
+V `contracts/` je implementovaná a testovaná prvá verzia wire kontraktu. `core/` obsahuje spustiteľnú Rust službu s health endpointom a interným execution ledgerom. HA adaptér sa pripája cez WebSocket a poskytuje read-only inventár cez chránené API. Panel a HA app zatiaľ neobsahujú funkčný runtime.
 
 ## Hranice systému
 
