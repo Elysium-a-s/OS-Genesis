@@ -1,6 +1,6 @@
 # Genesis core
 
-Minimálna Rust služba pre Linux. Poskytuje `GET /health` a tokenom chránené `GET /v1/devices`. Interný SQLite execution ledger eviduje prijatie povelu a pravdivé stavové prechody. Pilotné príkazy pre svetlo/zásuvku používajú samostatný write token, serverom určeného aktéra a execution ledger. Pilotné roly owner/member/guest sa vynucujú na API. Párovanie a revokácia tokenov patria do ELYSIUM-347. Health odpoveď nepotvrdzuje pripojenie k Home Assistantu ani stav zariadení.
+Minimálna Rust služba pre Linux. Poskytuje `GET /health` a tokenom chránené `GET /v1/devices`. Interný SQLite execution ledger eviduje prijatie povelu a pravdivé stavové prechody. Pilotné príkazy pre svetlo/zásuvku používajú samostatný write token, serverom určeného aktéra a execution ledger. Pilotné roly owner/member/guest sa vynucujú na API. Hlasový povel prechádza tou istou autorizáciou a tým istým ledgerom ako panel; Genesis pri tom neprijíma zvuk. Párovanie a revokácia tokenov patria do ELYSIUM-347. Health odpoveď nepotvrdzuje pripojenie k Home Assistantu ani stav zariadení.
 
 ## Lokálne spustenie
 
@@ -123,3 +123,39 @@ GitHub Actions kontroluje formát, build, testy a kompiláciu pre cieľ `aarch64
 Token nepridávajte do príkazového riadku, histórie shellu ani logov. Endpoint povoľuje iba existujúcu online HA entitu `light.*` alebo `switch.*` v pilotnej domácnosti. Identitu aktéra určuje core, nie JSON od klienta. Rovnaký idempotency key a zámer vrátia pôvodný povel bez druhého odoslania. Konfliktný zámer vráti 409. Snapshot možno čítať cez `GET /v1/commands/{command_id}` s read tokenom.
 
 Stav `sent` je iba odoslanie WebSocket správy. `provider_confirmed` vyžaduje úspešnú odpoveď `call_service`. `device_confirmed` vyžaduje čerstvú udalosť `state_changed` so zhodným HA context ID, entitou a požadovanou hodnotou. Časový limit po odoslaní je `unknown`, aj keď provider už potvrdil prijatie. Pri výpadku pred odoslaním je výsledok `failed`. Fyzické zapnutie/vypnutie, Tuya/Smart Life správanie a koreláciu konkrétnej žiarovky treba overiť na Home Assistant Green.
+
+## Hlasový povel
+
+`POST /v1/voice/commands` vezme prepis reči a vykoná ho tou istou cestou ako panel. Rozpoznávanie reči patrí hlasovému rozhraniu — v pilote Home Assistant Assist — a **Genesis neprijíma zvuk**: telo požiadavky má iba text, neznáme polia sa zamietajú, takže požiadavku so zvukom nie je možné ani poslať. STT/TTS adaptér je samostatná úloha epicu.
+
+```json
+{
+  "household_id": "pilot-home",
+  "transcript": "Zhasni svetlo v obývačke",
+  "idempotency_key": "voice-001",
+  "correlation_id": "assist-001",
+  "store_transcript": false
+}
+```
+
+Autorizácia je rovnaká ako pri paneli: vyžaduje `GENESIS_WRITE_TOKEN` alebo `GENESIS_MEMBER_TOKEN`, guest a service dostanú 403, `household_id` mimo pilotnej domácnosti je zamietnuté a identitu aktéra určuje core. Vykonanie ide cez `ha_command::run_power_command`, ktorý používa panel aj hlas, takže kontrola vykonateľnosti, idempotencia, ledger aj dôkazy sú pre oboch rovnaké. Prepis nedostáva žiadne právo, ktoré by nemal panel.
+
+### Z prepisu na typovaný intent
+
+Prevod je deterministický: uzavretý zoznam slov, žiadny model. Text sa prevedie na malé písmená, odstráni sa diakritika (rozpoznávanie reči ju vracia nespoľahlivo) a z každého slova sa zahodí jedna koncová samohláska, takže `obývačke` aj `obývačka` vedú na ten istý základ. Zariadenie sa hľadá v tomto poradí:
+
+1. **Podľa názvu z Home Assistanta.** Všetky významné slová názvu musia byť v povele. Jedna zhoda sa vykoná, viac zhôd nie.
+2. **Podľa druhu zariadenia** (`svetlo`, `lampa`, `zásuvka`, `light`, `plug`…), a to len vtedy, keď povel neobsahuje nič iné než druh. „Zhasni svetlo v spálni" preto nezhasne svetlo v obývačke ani vtedy, keď je to jediné svetlo: spálňu Genesis nepozná, takže správna odpoveď je nevykonať nič.
+3. Inak sa nevykoná nič.
+
+Vykonaný povel vracia 200 s intentom a snapshotom povelu. Nejednoznačný povel vracia **422**, nie 200 — klient ho nesmie pochopiť ako vykonaný — s dôvodom `unrecognised_action`, `conflicting_action`, `no_matching_device` alebo `several_matching_devices`; pri poslednom aj so zariadeniami, medzi ktorými sa Genesis nerozhodol, aby sa dalo doplniť otázku. Samotné sloveso bez cieľa neprepne ani jediné zariadenie.
+
+### Súhlas a prepis
+
+Prepis sa **neukladá ani nezapisuje do logov**. Uloží sa iba vtedy, keď požiadavka nesie `store_transcript: true`, teda keď používateľ súhlas dal, a aj potom len k povelu, ktorý sa naozaj vykonal. Nejednoznačný povel neuloží nič — nevznikne povel, záznam o hlase ani prepis.
+
+Že povel prišiel hlasom, sa zapisuje vždy, spolu s typovaným intentom (zariadenie a hodnota, nie slová). Audit tak vie o hlase aj vtedy, keď o vyslovenom vedieť nesmie. Idempotency kľúč, ktorý už patrí existujúcemu povelu, sa označí za hlasový len vtedy, keď ten povel vznikol týmto hlasovým povelom; inak by audit tvrdil o panelovom povele, že ho niekto vyslovil.
+
+### Limity
+
+Zoznam slov je uzavretý a pokrýva slovenské rozkazovacie formy zapnutia a vypnutia plus anglické `turn/switch on|off`; synonymá, iné jazyky a iné akcie než `power` nie sú podporované. Miestnosti a skupiny Genesis nepozná, pozná iba názvy zariadení z Home Assistanta, takže povel bez názvu alebo druhu zariadenia sa nevykoná. Odmietnutý povel neukladá nič, takže z neho nie je z čoho zlepšovať rozpoznávanie. Zapojenie na skutočný Home Assistant Assist ani hlasový povel na fyzickom zariadení zatiaľ neboli overené; patrí to k pilotu na Home Assistant Green.
