@@ -30,19 +30,19 @@ Zdroj parametrov: [Home Assistant Green](https://www.home-assistant.io/green). P
 
 ## 2. Prvé fyzické zariadenie
 
-**Plánované zariadenie: Wi‑Fi žiarovka.** Používateľ uviedol, že ešte nie je pripojená. Presný model nie je známy, preto nie je možné deklarovať fyzickú podporu alebo výsledok príkazu.
+**Plánované zariadenie: Wi‑Fi žiarovka ovládaná cez Smart Life.** Používateľ uviedol, že ešte nie je pripojená. Presný výrobca/model nie je známy, preto nie je možné deklarovať fyzickú podporu alebo výsledok príkazu.
 
 | Povinný údaj | Hodnota |
 | --- | --- |
 | Kategória (svetlo alebo zásuvka) | Wi‑Fi žiarovka, plánovaná |
 | Výrobca a presný model | Čaká na výber |
-| HA integrácia / entity ID | Čaká na overenie; do verejných dokumentov nevkladať citlivé identifikátory |
-| Cesta spojenia (Wi‑Fi, Ethernet, Zigbee, Matter, hub/cloud) | Wi‑Fi plánované; konkrétna HA integrácia neznáma |
+| HA integrácia / entity ID | Plánovaná oficiálna integrácia Tuya pre Smart Life; potvrdiť po pripojení; entity ID zatiaľ neexistuje |
+| Cesta spojenia (Wi‑Fi, Ethernet, Zigbee, Matter, hub/cloud) | Žiarovka cez Wi‑Fi do Smart Life; Home Assistant cez Tuya integráciu (cloud push podľa HA dokumentácie); skutočná cesta po spárovaní neoverená |
 | Schopnosti pre pilot | Čítanie stavu; bezpečné zapnutie a vypnutie |
 | Potvrdenie výsledku | Zistiť, či HA poskytne čerstvý stav po povele; provider odpoveď sama osebe nie je fyzické potvrdenie |
 | Fyzický dôkaz | Test vykonať na skutočnom zariadení, nie iba v simulátore |
 
-Výberové kritériá: zariadenie už pripojené do HA, jednoduchý bezpečný povel on/off, čitateľný stav, žiadna bezpečnostne kritická funkcia. Presný model a cesta spojenia sa zapíšu pred implementáciou adaptéra.
+Výberové kritériá: jednoduchý bezpečný povel on/off, čitateľný stav, žiadna bezpečnostne kritická funkcia. Po pripojení do Smart Life sa v HA nastaví a overí oficiálna integrácia [Tuya](https://www.home-assistant.io/integrations/tuya/). Táto integrácia pracuje s účtom Smart Life a je klasifikovaná ako cloud push; Wi‑Fi pri žiarovke preto samo osebe neznamená lokálne vykonávanie povelov. Presný model, entity a cesta sa zapíšu pred implementáciou adaptéra.
 
 ## 3. Obmedzenia pre Genesis na Green
 
@@ -66,7 +66,8 @@ Požiadať vlastníka o hodnoty **Installation type, Core, Supervisor, Operating
 - [x] Skutočný typ inštalácie a verzie HA Core/OS potvrdené screenshotom z jednotky.
 - [ ] Architektúra a verzia Supervisor potvrdené zo System information.
 - [x] Zvolená kategória a plánovaná cesta: Wi‑Fi žiarovka.
-- [ ] Presný model, HA integrácia a fyzické pripojenie potvrdené.
+- [x] Plánovaná aplikácia Smart Life a zodpovedajúca HA Tuya integrácia zdokumentované.
+- [ ] Presný model, skutočná HA integrácia a fyzické pripojenie potvrdené.
 - [ ] Priestor a voľná RAM zmerané alebo označené ako riziko pred nasadením.
 
 Story môže ísť do **In Review** po doplnení údajov z konkrétnej jednotky a výbere zariadenia; do **Done** až po schválení inventára. Následný výkonový a fyzický test patrí implementačným stories ELYSIUM-334, ELYSIUM-336 a ELYSIUM-338.
