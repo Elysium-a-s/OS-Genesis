@@ -28,11 +28,7 @@ class GenesisDevice {
         writable: json['writable'] as bool? ?? false,
       );
 
-  bool isStale(DateTime now) =>
-      availability != 'online' ||
-      power == null ||
-      observedAt == null ||
-      now.difference(observedAt!) > const Duration(seconds: 60);
+  bool get isStale => availability != 'online' || power == null;
 }
 
 class GenesisCommandResult {
