@@ -1,8 +1,8 @@
 use std::{env, net::SocketAddr, path::PathBuf};
 
-mod ledger;
 
 use axum::{routing::get, Json, Router};
+use genesis_core::ledger::Ledger;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug)]
@@ -55,7 +55,7 @@ async fn health() -> Json<serde_json::Value> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
-    let _ledger = ledger::Ledger::open(&config.ledger_path)?;
+    let _ledger = Ledger::open(&config.ledger_path)?;
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(config.log_filter)
