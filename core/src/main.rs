@@ -1,6 +1,5 @@
 use std::{env, net::SocketAddr, path::PathBuf};
 
-
 use axum::{routing::get, Json, Router};
 use genesis_core::ledger::Ledger;
 use tracing_subscriber::EnvFilter;
