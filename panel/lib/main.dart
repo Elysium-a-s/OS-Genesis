@@ -272,7 +272,7 @@ class _GenesisHomeState extends State<GenesisHome> {
       );
 
   Widget _deviceCard(GenesisDevice device) {
-    final stale = device.isStale(DateTime.now());
+    final stale = device.isStale;
     final state = stale
         ? 'Stav zastaraný alebo neznámy'
         : device.power == true
@@ -292,7 +292,7 @@ class _GenesisHomeState extends State<GenesisHome> {
                 color: stale ? Colors.amberAccent : Colors.greenAccent,
               )),
               if (device.observedAt != null)
-                Text('Pozorované: ${device.observedAt!.toLocal()}'),
+                Text('Posledná zmena v HA: ${device.observedAt!.toLocal()}'),
             ],
           )),
           Switch(
