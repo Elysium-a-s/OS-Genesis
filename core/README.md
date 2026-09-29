@@ -1,6 +1,6 @@
 # Genesis core
 
-Minimálna Rust služba pre Linux. V tejto fáze poskytuje iba `GET /health`. Interný SQLite execution ledger eviduje prijatie povelu a pravdivé stavové prechody. Inventár, autentifikované API, autorizácia a skutočné odosielanie príkazov do HA patria do ďalších Jira úloh. Health odpoveď nepotvrdzuje pripojenie k Home Assistantu ani stav zariadení.
+Minimálna Rust služba pre Linux. Poskytuje `GET /health` a tokenom chránené `GET /v1/devices`. Interný SQLite execution ledger eviduje prijatie povelu a pravdivé stavové prechody. Inventár, autentifikované API, autorizácia a skutočné odosielanie príkazov do HA patria do ďalších Jira úloh. Health odpoveď nepotvrdzuje pripojenie k Home Assistantu ani stav zariadení.
 
 ## Lokálne spustenie
 
@@ -21,6 +21,9 @@ Očakávaná odpoveď: HTTP 200, `Content-Type: application/json`, telo s `statu
 | `GENESIS_BIND_ADDR` | `127.0.0.1:8080` | IP adresa a port posluchu; neplatná hodnota zastaví štart. |
 | `GENESIS_LOG` | `genesis_core=info` | Filter štruktúrovaných JSON logov; neplatná hodnota zastaví štart. |
 | `GENESIS_LEDGER_PATH` | `./genesis-ledger.sqlite3` | Trvalý SQLite súbor. Pre Home Assistant app nastaviť cestu v perzistentnom `/data`; zlyhanie otvorenia zastaví štart. |
+| `GENESIS_HA_WS_URL` | nenastavené | HA WebSocket URL; nastavuje sa spolu s HA tokenom. |
+| `GENESIS_HA_TOKEN` | nenastavené | HA access token; nesmie byť v Gite ani logoch. |
+| `GENESIS_READ_TOKEN` | nenastavené | Samostatný token s aspoň 32 znakmi pre read-only inventár API. Bez neho `/v1/devices` vracia 503. |
 
 Predvolená adresa je dostupná iba lokálne. Pre Home Assistant app/kontajner môže byť potrebná adresa `0.0.0.0:8080`; pred sprístupnením mimo zariadenia musí ďalšia etapa pridať autentifikáciu alebo sieťové obmedzenie. Konfiguráciu držte v prostredí, nie v Gite. Core zatiaľ nepotrebuje žiadne tokeny a nikdy nevypisuje celé prostredie do logu.
 
@@ -29,6 +32,10 @@ Príklad vývojového spustenia na inom porte:
 ```sh
 GENESIS_BIND_ADDR=127.0.0.1:8081 GENESIS_LOG=genesis_core=debug cargo run
 ```
+
+## Home Assistant inventár
+
+Ak sú nastavené obe HA premenné, core sa autentifikuje cez WebSocket, načíta svetlá a zásuvky a po odpojení sa opäť pripája. Podrobnosti a limity sú v [adaptéri](../adapters/home-assistant/README.md). Inventár čítajte s hlavičkou `Authorization: Bearer <GENESIS_READ_TOKEN>` na `GET /v1/devices`; token poskytujte bezpečným klientom, neukladajte ho do repozitára. Endpoint vracia iba lokálny snapshot a neodosiela povely.
 
 ## Execution ledger
 
