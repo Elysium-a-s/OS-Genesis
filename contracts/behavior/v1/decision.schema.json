@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Elysium-a-s/OS-Genesis/contracts/behavior/v1/decision.schema.json",
+  "title": "Elysium Behavior to Genesis decision v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "decision_id",
+    "issuer",
+    "household_id",
+    "central_unit_id",
+    "subject_id",
+    "device_id",
+    "capability_id",
+    "requested_value",
+    "operation",
+    "valid_from",
+    "expires_at",
+    "reason_code",
+    "idempotency_key",
+    "required_confirmation"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "decision_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "issuer": {
+      "const": "behavior-engine"
+    },
+    "household_id": {
+      "$ref": "#/$defs/opaqueId"
+    },
+    "central_unit_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "subject_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "device_id": {
+      "$ref": "#/$defs/opaqueId"
+    },
+    "capability_id": {
+      "$ref": "#/$defs/opaqueId"
+    },
+    "requested_value": {
+      "type": "boolean"
+    },
+    "operation": {
+      "enum": [
+        "apply",
+        "revert"
+      ]
+    },
+    "valid_from": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "reason_code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "idempotency_key": {
+      "$ref": "#/$defs/opaqueId"
+    },
+    "required_confirmation": {
+      "enum": [
+        "provider",
+        "device"
+      ]
+    }
+  },
+  "$defs": {
+    "opaqueId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    }
+  }
+}

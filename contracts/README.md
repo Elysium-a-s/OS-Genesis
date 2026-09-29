@@ -31,4 +31,4 @@ The root schema accepts five message kinds: `household`, `device`, `capability`,
 
 Version `1.0` is intentionally narrow. A breaking field or semantic change requires a new versioned schema directory and migration plan. Additive changes within v1 require a reviewed schema change, examples, and tests; existing clients must not silently accept unknown fields. The `accepted` enum value was added for ELYSIUM-335; consumers of v1 must handle it as a non-confirmed state. Persisted events must retain their original schema version.
 
-The Elysium Behavior authorization and time-bound entitlement payloads are separate work in ELYSIUM-342. This v1 contract does not grant access by itself.
+The Elysium Behavior decision payload is specified separately in [behavior/](behavior/README.md) for ELYSIUM-342. It does not grant access by itself; Genesis must authenticate the service and enforce household authorization before execution.
