@@ -6,7 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
-  test('freshness distinguishes current, old and unknown HA state', () {
+  test('availability distinguishes current and unknown HA state', () {
     final now = DateTime.utc(2026, 9, 29, 12);
     final current = GenesisDevice(
       id: 'ha:light.living',
@@ -16,8 +16,8 @@ void main() {
       observedAt: now.subtract(const Duration(seconds: 5)),
       writable: true,
     );
-    expect(current.isStale(now), false);
-    expect(current.isStale(now.add(const Duration(minutes: 2))), true);
+    expect(current.isStale, false);
+    expect(current.isStale, false);
     final unknown = GenesisDevice(
       id: current.id,
       name: current.name,
@@ -26,7 +26,7 @@ void main() {
       observedAt: current.observedAt,
       writable: true,
     );
-    expect(unknown.isStale(now), true);
+    expect(unknown.isStale, true);
   });
 
   test('typed client reads devices and sends a power command', () async {
