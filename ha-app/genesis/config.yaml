@@ -1,0 +1,22 @@
+name: OS Genesis Pilot
+slug: genesis_pilot
+version: "0.1.0"
+description: Pilotná centrálna služba Genesis pre Home Assistant Green
+url: https://github.com/Elysium-a-s/OS-Genesis
+arch:
+  - aarch64
+stage: experimental
+startup: application
+boot: auto
+homeassistant_api: true
+image: ghcr.io/elysium-a-s/os-genesis-pilot
+ports:
+  8080/tcp: 8765
+ports_description:
+  8080/tcp: Genesis API v domácej sieti
+webui: http://[HOST]:[PORT:8080]/health
+watchdog: http://[HOST]:[PORT:8080]/health
+options:
+  read_token: null
+schema:
+  read_token: password

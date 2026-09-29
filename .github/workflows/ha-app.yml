@@ -1,0 +1,63 @@
+name: Build Genesis HA app (ARM64)
+
+on:
+  pull_request:
+    paths:
+      - 'core/**'
+      - 'ha-app/**'
+      - 'repository.yaml'
+      - '.github/workflows/ha-app.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'core/**'
+      - 'ha-app/**'
+      - 'repository.yaml'
+      - '.github/workflows/ha-app.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  arm64-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Build ARM64 image
+        run: docker buildx build --platform linux/arm64 --load --tag genesis-ha-pilot:ci --file ha-app/genesis/Dockerfile .
+      - name: Check image and restart
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect genesis-ha-pilot:ci --format '{{.Architecture}}')" = arm64
+          mkdir -p "$RUNNER_TEMP/genesis-data"
+          printf '%s\n' '{"read_token":"abcdefghijklmnopqrstuvwxyz012345"}' > "$RUNNER_TEMP/genesis-data/options.json"
+          chmod 600 "$RUNNER_TEMP/genesis-data/options.json"
+          container="$(docker run --platform linux/arm64 -d -e SUPERVISOR_TOKEN=ci-placeholder -v "$RUNNER_TEMP/genesis-data:/data" -p 127.0.0.1:18765:8080 genesis-ha-pilot:ci)"
+          trap 'docker logs "$container"; docker rm -f "$container" >/dev/null' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18765/health >/dev/null; then break; fi
+            sleep 2
+          done
+          curl --fail --silent http://127.0.0.1:18765/health
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:18765/v1/devices)" = 401
+          test "$(curl --silent --header 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345' http://127.0.0.1:18765/v1/devices)" = "[]"
+          docker restart --time 3 "$container" >/dev/null
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18765/health >/dev/null; then break; fi
+            sleep 2
+          done
+          curl --fail --silent http://127.0.0.1:18765/health
+          test -s "$RUNNER_TEMP/genesis-data/genesis-ledger.sqlite3"
+          docker stats --no-stream --format '{{.MemUsage}} {{.CPUPerc}}' "$container"
+      - name: Save image archive
+        run: docker save genesis-ha-pilot:ci | gzip -1 > "$RUNNER_TEMP/genesis-ha-pilot-arm64.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: genesis-ha-pilot-arm64
+          path: ${{ runner.temp }}/genesis-ha-pilot-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 14

@@ -1,6 +1,6 @@
 # Genesis core
 
-Minimálna Rust služba pre Linux. Poskytuje `GET /health` a tokenom chránené `GET /v1/devices`. Interný SQLite execution ledger eviduje prijatie povelu a pravdivé stavové prechody. Inventár, autentifikované API, autorizácia a skutočné odosielanie príkazov do HA patria do ďalších Jira úloh. Health odpoveď nepotvrdzuje pripojenie k Home Assistantu ani stav zariadení.
+Minimálna Rust služba pre Linux. Poskytuje `GET /health` a tokenom chránené `GET /v1/devices`. Interný SQLite execution ledger eviduje prijatie povelu a pravdivé stavové prechody. Autorizácia príkazov a skutočné odosielanie príkazov do HA patria do ďalších Jira úloh. Health odpoveď nepotvrdzuje pripojenie k Home Assistantu ani stav zariadení.
 
 ## Lokálne spustenie
 
@@ -25,7 +25,7 @@ Očakávaná odpoveď: HTTP 200, `Content-Type: application/json`, telo s `statu
 | `GENESIS_HA_TOKEN` | nenastavené | HA access token; nesmie byť v Gite ani logoch. |
 | `GENESIS_READ_TOKEN` | nenastavené | Samostatný token s aspoň 32 znakmi pre read-only inventár API. Bez neho `/v1/devices` vracia 503. |
 
-Predvolená adresa je dostupná iba lokálne. Pre Home Assistant app/kontajner môže byť potrebná adresa `0.0.0.0:8080`; pred sprístupnením mimo zariadenia musí ďalšia etapa pridať autentifikáciu alebo sieťové obmedzenie. Konfiguráciu držte v prostredí, nie v Gite. Core zatiaľ nepotrebuje žiadne tokeny a nikdy nevypisuje celé prostredie do logu.
+Predvolená adresa je dostupná iba lokálne. Pre Home Assistant app/kontajner môže byť potrebná adresa `0.0.0.0:8080`; chránený endpoint `/v1/devices` vyžaduje samostatný read token. Konfiguráciu držte v prostredí, nie v Gite. Core nikdy nevypisuje celé prostredie do logu.
 
 Príklad vývojového spustenia na inom porte:
 
