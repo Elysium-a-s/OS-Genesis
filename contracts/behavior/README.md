@@ -10,7 +10,7 @@ The window timestamps must end in UTC `Z`, with `valid_from < expires_at`. `requ
 
 ## Results and failures
 
-The execution response follows the existing Genesis [command v1](../../v1/message.schema.json) status model and carries the originating `decision_id` in the future Behavior transport mapping. A successful service call may yield `provider_confirmed` while the device remains unverified. Missing or mismatched observation yields `unknown` after timeout; the caller must query the ledger and reconcile before retrying. An explicit rejection yields `failed` with a reason code. Expired, unauthorized, cross-household or unsupported capability decisions are rejected before dispatch, with no physical action. The future transport must define an authenticated error envelope and persistent decision-to-command mapping; this contract alone does not claim these are implemented.
+The execution response follows the existing Genesis [command v1](../v1/message.schema.json) status model and carries the originating `decision_id` in the future Behavior transport mapping. A successful service call may yield `provider_confirmed` while the device remains unverified. Missing or mismatched observation yields `unknown` after timeout; the caller must query the ledger and reconcile before retrying. An explicit rejection yields `failed` with a reason code. Expired, unauthorized, cross-household or unsupported capability decisions are rejected before dispatch, with no physical action. The future transport must define an authenticated error envelope and persistent decision-to-command mapping; this contract alone does not claim these are implemented.
 
 ## Compatibility
 
