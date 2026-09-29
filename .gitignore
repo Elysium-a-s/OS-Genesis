@@ -1,0 +1,9 @@
+# Rust build output
+core/target/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
