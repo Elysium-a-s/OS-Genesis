@@ -1,0 +1,56 @@
+name: Build Genesis panel
+
+on:
+  pull_request:
+    paths:
+      - 'panel/**'
+      - '.github/workflows/panel.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'panel/**'
+      - '.github/workflows/panel.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: panel
+    steps:
+      - uses: actions/checkout@v6
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter create --platforms=web --org com.elysium.genesis .
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+      - run: flutter build web --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: genesis-panel-web
+          path: panel/build/web
+          if-no-files-found: error
+          retention-days: 14
+
+  ipad-simulator:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: panel
+    steps:
+      - uses: actions/checkout@v6
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter create --platforms=ios --org com.elysium.genesis .
+      - run: flutter pub get
+      - run: flutter build ios --simulator --no-codesign
