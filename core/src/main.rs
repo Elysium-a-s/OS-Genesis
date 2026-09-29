@@ -329,19 +329,32 @@ mod tests {
             "value": true,
             "idempotency_key": "idem-1",
             "correlation_id": "corr-1"
-        }).to_string();
-        let unauthorized = app(state.clone()).oneshot(
-            Request::builder().method("POST").uri("/v1/commands")
-                .header("content-type", "application/json")
-                .body(Body::from(body.clone())).unwrap()
-        ).await.unwrap();
+        })
+        .to_string();
+        let unauthorized = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
-        let forbidden = app(state).oneshot(
-            Request::builder().method("POST").uri("/v1/commands")
-                .header("content-type", "application/json")
-                .header("authorization", format!("Bearer {}", "w".repeat(32)))
-                .body(Body::from(body)).unwrap()
-        ).await.unwrap();
+        let forbidden = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/commands")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {}", "w".repeat(32)))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
     }
 
