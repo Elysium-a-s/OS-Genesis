@@ -1,6 +1,6 @@
 # OS Genesis — agent instructions
 
-Genesis má verziovaný kontrakt v `contracts/` a dokumentačné kostry ostatných modulov. Funkčný runtime a build systém core/panelu/HA app zatiaľ neexistujú.
+Genesis má verziovaný kontrakt v `contracts/` a minimálny Rust runtime v `core/`. Panel a HA app zatiaľ nemajú funkčný runtime.
 
 ## Working method
 - Search filenames/symbols first; read targeted ranges.
@@ -24,7 +24,7 @@ Genesis má verziovaný kontrakt v `contracts/` a dokumentačné kostry ostatný
 
 ## Repository rules
 - Inspect the current tree before choosing implementation conventions.
-- No runtime or build system for core/panel/HA app is established yet. The v1 contract has a repeatable JSON Schema validation workflow documented in `contracts/README.md`.
+- Core sa overuje podľa `core/README.md` a `.github/workflows/core.yml`. Panel a HA app zatiaľ nemajú build systém. V1 kontrakt sa validuje podľa `contracts/README.md`.
 - Do not infer a platform or copy backend/mobile deployment assumptions here.
 - Treat the architecture and languages in README as a starting proposal until validated on pilot hardware.
 
@@ -32,4 +32,4 @@ Genesis má verziovaný kontrakt v `contracts/` a dokumentačné kostry ostatný
 - Project scope: [README](README.md).
 - Add implementation architecture under `docs/` when implementation establishes it.
 - Add a narrowly named `.agents/skills/<workflow>/SKILL.md` only for a real repeated workflow.
-- Until then, validate documentation links and whitespace; do not claim runtime tests.
+- Pri čisto dokumentačných zmenách validuj odkazy a whitespace; runtime testy deklaruj len po skutočnom spustení.
