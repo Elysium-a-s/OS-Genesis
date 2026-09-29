@@ -56,7 +56,9 @@ impl BehaviorDecision {
             if id.is_empty()
                 || id.len() > 128
                 || !id.as_bytes()[0].is_ascii_alphanumeric()
-                || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
             {
                 return Err("invalid opaque identifier".into());
             }
@@ -64,7 +66,10 @@ impl BehaviorDecision {
         if self.reason_code.is_empty()
             || self.reason_code.len() > 64
             || !self.reason_code.as_bytes()[0].is_ascii_lowercase()
-            || !self.reason_code.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            || !self
+                .reason_code
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
         {
             return Err("invalid reason code".into());
         }
@@ -77,8 +82,12 @@ impl BehaviorDecision {
     }
 
     pub fn active_at(&self, now: DateTime<Utc>) -> bool {
-        let Ok(from) = parse_utc(&self.valid_from) else { return false };
-        let Ok(until) = parse_utc(&self.expires_at) else { return false };
+        let Ok(from) = parse_utc(&self.valid_from) else {
+            return false;
+        };
+        let Ok(until) = parse_utc(&self.expires_at) else {
+            return false;
+        };
         from <= now && now < until
     }
 }
@@ -114,13 +123,16 @@ mod tests {
             "reason_code":"goal_verified",
             "idempotency_key":"behavior:ff77bdb0-70af-4f2a-a913-76609b66761b",
             "required_confirmation":"device"
-        }).to_string()
+        })
+        .to_string()
     }
 
     #[test]
     fn accepts_valid_decision_and_checks_window() {
         let decision = BehaviorDecision::parse(&example()).unwrap();
-        let now = DateTime::parse_from_rfc3339("2026-09-29T18:30:00Z").unwrap().with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-09-29T18:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
         assert!(decision.active_at(now));
     }
 
