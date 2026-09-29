@@ -38,8 +38,8 @@ class _GenesisHomeState extends State<GenesisHome> {
     'GENESIS_API_URL',
     defaultValue: 'http://localhost:8765',
   ));
-  final _readToken = TextEditingController();
-  final _writeToken = TextEditingController();
+  final _accessToken = TextEditingController();
+  GenesisPrincipal? _principal;
   final _client = http.Client();
   Timer? _timer;
   ConnectionStatus _status = ConnectionStatus.checking;
@@ -58,7 +58,7 @@ class _GenesisHomeState extends State<GenesisHome> {
     _checkHealth();
     _timer = Timer.periodic(const Duration(seconds: 15), (_) {
       _checkHealth();
-      if (_readToken.text.isNotEmpty) _refreshDevices();
+      if (_accessToken.text.isNotEmpty) _refreshDevices();
     });
   }
 
@@ -95,31 +95,36 @@ class _GenesisHomeState extends State<GenesisHome> {
 
   Future<void> _refreshDevices() async {
     final base = _baseUrl();
-    if (base == null || _readToken.text.isEmpty) {
-      setState(() => _inventoryError = 'Zadajte adresu a read token.');
+    if (base == null || _accessToken.text.isEmpty) {
+      setState(() => _inventoryError = 'Zadajte adresu a prístupový token.');
       return;
     }
     try {
       final api = GenesisApi(baseUrl: base, client: _client);
-      final devices = await api.devices(_readToken.text);
+      final principal = await api.me(_accessToken.text);
+      final devices = await api.devices(_accessToken.text);
       if (mounted) {
         setState(() {
+          _principal = principal;
           _devices = devices;
           _inventoryError = null;
         });
       }
     } catch (_) {
       if (mounted) {
-        setState(() => _inventoryError =
-            'Inventár nie je dostupný. Skontrolujte spojenie a prístup.');
+        setState(() {
+          _principal = null;
+          _devices = [];
+          _inventoryError = 'Inventár nie je dostupný. Skontrolujte spojenie a prístup.';
+        });
       }
     }
   }
 
   Future<void> _setPower(GenesisDevice device) async {
     final base = _baseUrl();
-    if (base == null || _writeToken.text.isEmpty || device.power == null) {
-      setState(() => _commandMessage = 'Zadajte write token a obnovte stav.');
+    if (base == null || _principal?.canControlDevices != true || device.power == null) {
+      setState(() => _commandMessage = 'Táto rola nemôže ovládať zariadenie.');
       return;
     }
     setState(() {
@@ -130,8 +135,8 @@ class _GenesisHomeState extends State<GenesisHome> {
     try {
       final api = GenesisApi(baseUrl: base, client: _client);
       final result = await api.setPower(
-        writeToken: _writeToken.text,
-        householdId: 'pilot-home',
+        writeToken: _accessToken.text,
+        householdId: _principal!.householdId,
         deviceId: device.id,
         value: !device.power!,
       );
@@ -154,8 +159,7 @@ class _GenesisHomeState extends State<GenesisHome> {
     _timer?.cancel();
     _client.close();
     _url.dispose();
-    _readToken.dispose();
-    _writeToken.dispose();
+    _accessToken.dispose();
     super.dispose();
   }
 
@@ -181,6 +185,7 @@ class _GenesisHomeState extends State<GenesisHome> {
               padding: EdgeInsets.all(wide ? 32 : 16),
               children: [
                 Text(_household, style: Theme.of(context).textTheme.headlineSmall),
+                if (_principal != null) Text('Rola: ${_principal!.role}'),
                 const SizedBox(height: 8),
                 Text(_room, style: Theme.of(context).textTheme.displaySmall),
                 const SizedBox(height: 24),
@@ -237,21 +242,16 @@ class _GenesisHomeState extends State<GenesisHome> {
               ),
               const SizedBox(height: 12),
               TextField(
-                controller: _readToken,
+                controller: _accessToken,
                 obscureText: true,
                 decoration: const InputDecoration(
-                  labelText: 'Read token',
+                  labelText: 'Prístupový token',
                   border: OutlineInputBorder(),
                 ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _writeToken,
-                obscureText: true,
-                decoration: const InputDecoration(
-                  labelText: 'Write token',
-                  border: OutlineInputBorder(),
-                ),
+                onChanged: (_) => setState(() {
+                  _principal = null;
+                  _devices = [];
+                }),
               ),
               const SizedBox(height: 12),
               Wrap(spacing: 12, children: [
@@ -297,7 +297,8 @@ class _GenesisHomeState extends State<GenesisHome> {
           )),
           Switch(
             value: device.power ?? false,
-            onChanged: stale || !device.writable || _pendingDeviceId != null
+            onChanged: stale || !device.writable ||
+                    _principal?.canControlDevices != true || _pendingDeviceId != null
                 ? null
                 : (_) => _setPower(device),
           ),
