@@ -1,6 +1,6 @@
 # Genesis core
 
-Minimálna Rust služba pre Linux. Poskytuje `GET /health` a tokenom chránené `GET /v1/devices`. Interný SQLite execution ledger eviduje prijatie povelu a pravdivé stavové prechody. Pilotné príkazy pre svetlo/zásuvku používajú samostatný write token, serverom určeného aktéra a execution ledger. Roly domácnosti a prepojenie s Elysium aplikáciou patria do ďalších Jira úloh. Health odpoveď nepotvrdzuje pripojenie k Home Assistantu ani stav zariadení.
+Minimálna Rust služba pre Linux. Poskytuje `GET /health` a tokenom chránené `GET /v1/devices`. Interný SQLite execution ledger eviduje prijatie povelu a pravdivé stavové prechody. Pilotné príkazy pre svetlo/zásuvku používajú samostatný write token, serverom určeného aktéra a execution ledger. Pilotné roly owner/member/guest sa vynucujú na API. Párovanie a revokácia tokenov patria do ELYSIUM-347. Health odpoveď nepotvrdzuje pripojenie k Home Assistantu ani stav zariadení.
 
 ## Lokálne spustenie
 
@@ -24,8 +24,12 @@ Očakávaná odpoveď: HTTP 200, `Content-Type: application/json`, telo s `statu
 | `GENESIS_HA_WS_URL` | nenastavené | HA WebSocket URL; nastavuje sa spolu s HA tokenom. |
 | `GENESIS_HA_TOKEN` | nenastavené | HA access token; nesmie byť v Gite ani logoch. |
 | `GENESIS_READ_TOKEN` | nenastavené | Samostatný token s aspoň 32 znakmi pre read-only inventár a snapshot povelu. Bez neho read endpointy vracajú 503. |
-| `GENESIS_WRITE_TOKEN` | nenastavené | Samostatný token s aspoň 32 znakmi pre POST povelu. |
+| `GENESIS_WRITE_TOKEN` | nenastavené | Pilotný owner token s aspoň 32 znakmi. Umožňuje čítanie a ovládanie. |
+| `GENESIS_MEMBER_TOKEN` | nenastavené | Voliteľný member token s aspoň 32 znakmi. Umožňuje čítanie a ovládanie. |
+| `GENESIS_GUEST_TOKEN` | nenastavené | Voliteľný guest token s aspoň 32 znakmi. Umožňuje iba čítanie. |
 | `GENESIS_HOUSEHOLD_ID` | `pilot-home` | Jediná povolená pilotná domácnosť. |
+
+Všetky nastavené prístupové tokeny musia byť navzájom odlišné. `GET /v1/me` vráti serverom určenú domácnosť, aktéra, rolu a `can_control_devices`. `POST /v1/commands` vracia guest/service role 403; `household_id` mimo pilotnej domácnosti je zamietnuté. Pilot používa jeden token na rolu, preto zatiaľ nerozlišuje konkrétnych členov v rovnakej role. Vydávanie tokenov a ich revokácia sú predmetom ELYSIUM-347. Pri expozícii mimo dôveryhodnej LAN je potrebné TLS a autentifikovaný prístupový kanál.
 
 Predvolená adresa je dostupná iba lokálne. Pre Home Assistant app/kontajner môže byť potrebná adresa `0.0.0.0:8080`; chránený endpoint `/v1/devices` vyžaduje samostatný read token. Konfiguráciu držte v prostredí, nie v Gite. Core nikdy nevypisuje celé prostredie do logu.
 
@@ -58,7 +62,7 @@ GitHub Actions kontroluje formát, build, testy a kompiláciu pre cieľ `aarch64
 
 ## Pilotný povel pre svetlo alebo zásuvku
 
-`POST /v1/commands` vyžaduje `Authorization: Bearer <GENESIS_WRITE_TOKEN>` a JSON:
+`POST /v1/commands` vyžaduje `Authorization: Bearer <GENESIS_WRITE_TOKEN alebo GENESIS_MEMBER_TOKEN>` a JSON:
 
 ```json
 {
