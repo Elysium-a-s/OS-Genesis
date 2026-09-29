@@ -2,7 +2,7 @@
 
 OS Genesis je pripravovaný systém centrálnej jednotky a kontrolného centra Elysium. Prvý pilot bude bežať vedľa existujúceho Home Assistantu na jeho hardvéri. Home Assistant poskytne zariadenia a ich udalosti; Genesis vytvorí vlastný model zariadení, vykonávanie príkazov a rozhranie pre panely a Elysium Behavior.
 
-> Stav: úvodná štruktúra a návrh. Tento repozitár zatiaľ neobsahuje funkčný runtime ani inštalovateľný balík.
+> Stav: v1 kontrakt a minimálny Rust core s health endpointom. Integrácia zariadení, panel a inštalovateľný balík ešte nie sú hotové.
 
 ## Prvý overiteľný cieľ
 
@@ -20,7 +20,7 @@ Genesis načíta jedno skutočné svetlo z Home Assistantu, zobrazí jeho stav n
 | `docs/` | Architektúra, rozhodnutia a prevádzkové návody |
 | `tests/` | End-to-end scenáre a dôkazy z fyzických zariadení |
 
-V `contracts/` je implementovaná a testovaná prvá verzia wire kontraktu. Core, adaptér, panel a HA app zatiaľ neobsahujú funkčný runtime.
+V `contracts/` je implementovaná a testovaná prvá verzia wire kontraktu. `core/` obsahuje spustiteľnú Rust službu s health endpointom. Adaptér, panel a HA app zatiaľ neobsahujú funkčný runtime.
 
 ## Hranice systému
 
@@ -33,7 +33,7 @@ V `contracts/` je implementovaná a testovaná prvá verzia wire kontraktu. Core
 ## Poradie vývoja
 
 1. Spísať `contracts/` pre inventár, stav a príkazy vrátane verzie schémy, identity domácnosti, idempotency key a korelačného ID.
-2. Vytvoriť minimálny `core/` s health endpointom, bezpečnou konfiguráciou a záznamom výsledku príkazu.
+2. Vytvoriť minimálny `core/` s health endpointom a bezpečnou konfiguráciou; záznam výsledku príkazu nasleduje po adaptéri.
 3. Napísať `adapters/home-assistant/` pre jedno svetlo a otestovať čítanie stavu, príkaz, timeout a obnovu spojenia.
 4. Vytvoriť `panel/` s jednou miestnosťou, zariadením a viditeľným stavom príkazu.
 5. Zabaliť službu do `ha-app/` a overiť na konkrétnom HA hardvéri.
