@@ -445,9 +445,15 @@ mod tests {
             ("r".repeat(32), "service", false),
         ] {
             let response = app(state.clone())
-                .oneshot(Request::builder().uri("/v1/me")
-                    .header("authorization", format!("Bearer {token}"))
-                    .body(Body::empty()).unwrap()).await.unwrap();
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/me")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let body = to_bytes(response.into_body(), 1024).await.unwrap();
             let me: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -458,23 +464,41 @@ mod tests {
         let body = serde_json::json!({
             "household_id": "pilot-home", "device_id": "ha:light.living",
             "value": true, "idempotency_key": "idem-role", "correlation_id": "corr-role"
-        }).to_string();
+        })
+        .to_string();
         for token in ["g".repeat(32), "r".repeat(32)] {
             let response = app(state.clone())
-                .oneshot(Request::builder().method("POST").uri("/v1/commands")
-                    .header("content-type", "application/json")
-                    .header("authorization", format!("Bearer {token}"))
-                    .body(Body::from(body.clone())).unwrap()).await.unwrap();
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/commands")
+                        .header("content-type", "application/json")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::from(body.clone()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
         }
         let response = app(state)
-            .oneshot(Request::builder().method("POST").uri("/v1/commands")
-                .header("content-type", "application/json")
-                .header("authorization", format!("Bearer {}", "m".repeat(32)))
-                .body(Body::from(serde_json::json!({
-                    "household_id": "other-home", "device_id": "ha:light.living",
-                    "value": true, "idempotency_key": "idem-other", "correlation_id": "corr-other"
-                }).to_string())).unwrap()).await.unwrap();
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/commands")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {}", "m".repeat(32)))
+                    .body(Body::from(
+                        serde_json::json!({
+                            "household_id": "other-home", "device_id": "ha:light.living",
+                            "value": true, "idempotency_key": "idem-other", "correlation_id": "corr-other"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
