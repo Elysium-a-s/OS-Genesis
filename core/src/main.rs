@@ -41,8 +41,12 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("./genesis-ledger.sqlite3"));
         config.read_token = env::var("GENESIS_READ_TOKEN").ok();
         config.write_token = env::var("GENESIS_WRITE_TOKEN").ok();
-        config.member_token = env::var("GENESIS_MEMBER_TOKEN").ok();
-        config.guest_token = env::var("GENESIS_GUEST_TOKEN").ok();
+        config.member_token = env::var("GENESIS_MEMBER_TOKEN")
+            .ok()
+            .filter(|token| !token.is_empty());
+        config.guest_token = env::var("GENESIS_GUEST_TOKEN")
+            .ok()
+            .filter(|token| !token.is_empty());
         config.household_id =
             env::var("GENESIS_HOUSEHOLD_ID").unwrap_or_else(|_| "pilot-home".to_owned());
         if config
