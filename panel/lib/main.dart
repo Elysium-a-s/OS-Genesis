@@ -36,7 +36,7 @@ class GenesisHome extends StatefulWidget {
 class _GenesisHomeState extends State<GenesisHome> {
   final _url = TextEditingController(text: const String.fromEnvironment(
     'GENESIS_API_URL',
-    defaultValue: 'http://localhost:8765',
+    defaultValue: '',
   ));
   final _accessToken = TextEditingController();
   GenesisPrincipal? _principal;
@@ -63,7 +63,8 @@ class _GenesisHomeState extends State<GenesisHome> {
   }
 
   Uri? _baseUrl() {
-    final base = Uri.tryParse(_url.text.trim());
+    final raw = _url.text.trim();
+    final base = raw.isEmpty ? Uri.base : Uri.tryParse(raw);
     if (base == null ||
         (base.scheme != 'http' && base.scheme != 'https') ||
         base.host.isEmpty) {
