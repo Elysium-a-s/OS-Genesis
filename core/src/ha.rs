@@ -163,13 +163,6 @@ impl Registry {
     async fn replace(&self, snapshot: RegistrySnapshot) {
         *self.0.write().await = snapshot;
     }
-
-    /// Naplní mapovanie priamo, bez HA sedenia. Potrebujú to testy API, ktoré
-    /// pracujú s miestnosťami bez WebSocket servera.
-    #[cfg(test)]
-    pub(crate) async fn seed(&self, snapshot: RegistrySnapshot) {
-        self.replace(snapshot).await;
-    }
 }
 
 /// Stav prepojenia Genesis↔Home Assistant.
