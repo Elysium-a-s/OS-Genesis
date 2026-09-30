@@ -27,11 +27,14 @@ Očakávaná odpoveď: HTTP 200, `Content-Type: application/json`, telo s `statu
 | `GENESIS_WRITE_TOKEN` | nenastavené | Pilotný owner token s aspoň 32 znakmi. Umožňuje čítanie a ovládanie. |
 | `GENESIS_MEMBER_TOKEN` | nenastavené | Voliteľný member token s aspoň 32 znakmi. Umožňuje čítanie a ovládanie. |
 | `GENESIS_GUEST_TOKEN` | nenastavené | Voliteľný guest token s aspoň 32 znakmi. Umožňuje iba čítanie. |
+| `GENESIS_PANEL_DIR` | nenastavené | Voliteľný adresár so zostaveným Flutter web panelom. Musí obsahovať `index.html`; panel sa poskytuje na `/` z rovnakej adresy ako API. |
 | `GENESIS_HOUSEHOLD_ID` | `pilot-home` | Jediná povolená pilotná domácnosť. |
 | `GENESIS_BACKUP_DIR` | nenastavené | Priečinok pre zálohy databázy. Bez neho vracia `POST /v1/backup` 503. V Home Assistant app patrí pod perzistentné `/data`. |
 | `GENESIS_SENSITIVE_DEVICES` | nenastavené | Zoznam `device_id` oddelený čiarkou, ktoré prevádzkovateľ označil za citlivé. Hlasová akcia na nich vyžaduje potvrdenie. Neplatná hodnota zastaví štart. |
 
 Všetky nastavené prístupové tokeny musia byť navzájom odlišné. `GET /v1/me` vráti serverom určenú domácnosť, aktéra, rolu a `can_control_devices`. `POST /v1/commands` vracia guest/service role 403; `household_id` mimo pilotnej domácnosti je zamietnuté. Tokeny z konfigurácie sú **bootstrap tejto jednotky**: jeden na rolu, takže konkrétnych členov v rovnakej role nerozlišujú. Aktérov na osobu vydáva párovanie nižšie. Pri expozícii mimo dôveryhodnej LAN je potrebné TLS a autentifikovaný prístupový kanál.
+
+Ak je `GENESIS_PANEL_DIR` nastavený, `GET /` a webové assety poskytujú Flutter panel. API zostáva na `/v1/*` a health na `/health`; chýbajúca API cesta nevracia HTML.
 
 Predvolená adresa je dostupná iba lokálne. Pre Home Assistant app/kontajner môže byť potrebná adresa `0.0.0.0:8080`; chránený endpoint `/v1/devices` vyžaduje samostatný read token. Konfiguráciu držte v prostredí, nie v Gite. Core nikdy nevypisuje celé prostredie do logu.
 
