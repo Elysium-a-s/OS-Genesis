@@ -1,6 +1,6 @@
 # Genesis core
 
-Minimálna Rust služba pre Linux. Poskytuje `GET /health` a tokenom chránené `GET /v1/devices`. Interný SQLite execution ledger eviduje prijatie povelu a pravdivé stavové prechody. Pilotné príkazy pre svetlo/zásuvku používajú samostatný write token, serverom určeného aktéra a execution ledger. Pilotné roly owner/member/guest sa vynucujú na API. Hlasový povel prechádza tou istou autorizáciou a tým istým ledgerom ako panel; Genesis pri tom neprijíma zvuk. Párovanie a revokácia tokenov patria do ELYSIUM-347. Health odpoveď nepotvrdzuje pripojenie k Home Assistantu ani stav zariadení.
+Minimálna Rust služba pre Linux. Poskytuje `GET /health` a tokenom chránené `GET /v1/devices`. Interný SQLite execution ledger eviduje prijatie povelu a pravdivé stavové prechody. Pilotné príkazy pre svetlo/zásuvku používajú samostatný write token, serverom určeného aktéra a execution ledger. Pilotné roly owner/member/guest sa vynucujú na API. Hlasový povel prechádza tou istou autorizáciou a tým istým ledgerom ako panel; Genesis pri tom neprijíma zvuk. Prístup sa vydáva párovaním s jednorazovým kódom a dá sa odobrať; tajomstvá sú v databáze iba ako odtlačok. Health odpoveď nepotvrdzuje pripojenie k Home Assistantu ani stav zariadení.
 
 ## Lokálne spustenie
 
@@ -30,7 +30,7 @@ Očakávaná odpoveď: HTTP 200, `Content-Type: application/json`, telo s `statu
 | `GENESIS_HOUSEHOLD_ID` | `pilot-home` | Jediná povolená pilotná domácnosť. |
 | `GENESIS_SENSITIVE_DEVICES` | nenastavené | Zoznam `device_id` oddelený čiarkou, ktoré prevádzkovateľ označil za citlivé. Hlasová akcia na nich vyžaduje potvrdenie. Neplatná hodnota zastaví štart. |
 
-Všetky nastavené prístupové tokeny musia byť navzájom odlišné. `GET /v1/me` vráti serverom určenú domácnosť, aktéra, rolu a `can_control_devices`. `POST /v1/commands` vracia guest/service role 403; `household_id` mimo pilotnej domácnosti je zamietnuté. Pilot používa jeden token na rolu, preto zatiaľ nerozlišuje konkrétnych členov v rovnakej role. Vydávanie tokenov a ich revokácia sú predmetom ELYSIUM-347. Pri expozícii mimo dôveryhodnej LAN je potrebné TLS a autentifikovaný prístupový kanál.
+Všetky nastavené prístupové tokeny musia byť navzájom odlišné. `GET /v1/me` vráti serverom určenú domácnosť, aktéra, rolu a `can_control_devices`. `POST /v1/commands` vracia guest/service role 403; `household_id` mimo pilotnej domácnosti je zamietnuté. Tokeny z konfigurácie sú **bootstrap tejto jednotky**: jeden na rolu, takže konkrétnych členov v rovnakej role nerozlišujú. Aktérov na osobu vydáva párovanie nižšie. Pri expozícii mimo dôveryhodnej LAN je potrebné TLS a autentifikovaný prístupový kanál.
 
 Predvolená adresa je dostupná iba lokálne. Pre Home Assistant app/kontajner môže byť potrebná adresa `0.0.0.0:8080`; chránený endpoint `/v1/devices` vyžaduje samostatný read token. Konfiguráciu držte v prostredí, nie v Gite. Core nikdy nevypisuje celé prostredie do logu.
 
@@ -185,4 +185,32 @@ Prepis sa **neukladá ani nezapisuje do logov**. Uloží sa iba vtedy, keď pož
 
 ### Limity
 
-Zoznam slov je uzavretý a pokrýva slovenské rozkazovacie formy zapnutia a vypnutia plus anglické `turn/switch on|off`; synonymá, iné jazyky a iné akcie než `power` nie sú podporované. Pilot má jeden token na rolu, takže „ten istý člen" znamená tá istá rola — dvoch členov zdieľajúcich token Genesis nerozlíši; to odpadne až s vydávaním tokenov (ELYSIUM-347). Či má citlivú akciu potvrdzovať prísnejšia rola než tá, ktorá o ňu požiadala, je produktové rozhodnutie a zostáva otvorené. Audit nemá retenciu, iba ohraničenú odpoveď. Miestnosti a skupiny Genesis nepozná, pozná iba názvy zariadení z Home Assistanta, takže povel bez názvu alebo druhu zariadenia sa nevykoná. Odmietnutý povel neukladá nič, takže z neho nie je z čoho zlepšovať rozpoznávanie. Zapojenie na skutočný Home Assistant Assist ani hlasový povel na fyzickom zariadení zatiaľ neboli overené; patrí to k pilotu na Home Assistant Green.
+Zoznam slov je uzavretý a pokrýva slovenské rozkazovacie formy zapnutia a vypnutia plus anglické `turn/switch on|off`; synonymá, iné jazyky a iné akcie než `power` nie sú podporované. Pilot má jeden token na rolu, takže „ten istý člen" znamená tá istá rola — dvoch členov zdieľajúcich token Genesis nerozlíši; token z konfigurácie osobu nenesie. S vydanou kreditívou (párovanie nižšie) už „ten istý člen" znamená konkrétneho aktéra. Či má citlivú akciu potvrdzovať prísnejšia rola než tá, ktorá o ňu požiadala, je produktové rozhodnutie a zostáva otvorené. Audit nemá retenciu, iba ohraničenú odpoveď. Miestnosti a skupiny Genesis nepozná, pozná iba názvy zariadení z Home Assistanta, takže povel bez názvu alebo druhu zariadenia sa nevykoná. Odmietnutý povel neukladá nič, takže z neho nie je z čoho zlepšovať rozpoznávanie. Zapojenie na skutočný Home Assistant Assist ani hlasový povel na fyzickom zariadení zatiaľ neboli overené; patrí to k pilotu na Home Assistant Green.
+
+## Párovanie a prístupové tokeny
+
+Prístup ku Genesis sa nezískava tým, že si niekto prečíta konfiguráciu. Vlastník domácnosti spustí párovanie, dostane **jednorazový kód**, a ten sa raz vymení za prístupový token pre konkrétneho aktéra. Token sa dá kedykoľvek odobrať. Návrh a jeho dôvody sú v [docs/ELYSIUM-347-identita.md](../docs/ELYSIUM-347-identita.md).
+
+1. Vlastník spustí párovanie: `POST /v1/pairings` s `{"household_id","role","actor_id"}`. V odpovedi je `code` — práve raz.
+2. Klient kód vymení: `POST /v1/pairings/redeem` s `{"household_id","code"}`. V odpovedi je `token` — práve raz. Tento endpoint nepotrebuje token, pretože kód sám je oprávnenie.
+3. Vlastník vidí vydané kreditívy na `GET /v1/credentials` a ktorúkoľvek odoberie cez `DELETE /v1/credentials/{credential_id}`.
+
+Kód ani token nedávajte do príkazového riadku, histórie shellu ani logov. Pri expozícii mimo dôveryhodnej LAN platí to isté ako pre ostatné endpointy: bez TLS ich vidí sieť.
+
+Párovanie aj odobranie je **iba pre vlastníka**; member, guest a service dostanú 403. Vlastník smie vydať aj ďalšieho vlastníka — druhý vlastník domácnosti je legitímny stav. Kód platí desať minút a vymení sa presne raz; nepoužiteľný kód vracia 422 bez toho, aby prezradil, čo mu chýba. Odobraná kreditíva je pri ďalšej požiadavke 401.
+
+Vydaná kreditíva nesie `actor_id`, takže `GET /v1/me`, execution ledger aj hlasový audit hovoria **kto**, nie iba akou rolou. Prehľad kreditív ukazuje `issued_at`, `last_used_at`, `revoked_at` a `revoked_by`, aby sa dalo rozhodnúť, čo je ešte potrebné.
+
+### Tajomstvá
+
+V databáze je z kódu aj z tokenu iba SHA-256 odtlačok. Ani úplný výpis tabuliek nedá hodnotu, ktorou sa dá vojsť, a Genesis token nedokáže zopakovať — kto ho stratí, spraví nové párovanie. Do logu sa píše `pairing_id`, `credential_id`, rola a aktér; kód ani token nikdy. V Gite nie je ani jedno, pretože obe vznikajú až za behu.
+
+Prečo stačí jeden SHA-256 a nie zdržiavacia funkcia: tokeny nie sú heslá, sú to náhodné hodnoty s viac než dvomi stovkami bitov entropie. Proti nim nemá slovníkový ani hrubý útok o čo sa oprieť.
+
+### Cudzia domácnosť
+
+Kreditíva nesie domácnosť, pre ktorú bola vydaná. Jednotka prijme iba kreditívu svojej domácnosti, takže prenesená databáza cudziu domácnosť neovládne. Povel s `household_id` inej domácnosti je 403 aj vtedy, keď rola na ovládanie stačí, a kód jednej domácnosti nevydá kreditívu pre druhú.
+
+### Limity
+
+Tokeny z konfigurácie zostávajú a sú prvé v poradí — sú bootstrapom, ktorým vlastník vôbec spustí prvé párovanie, a pilotný Home Assistant app ich nastavuje v možnostiach. Odobrať sa nedajú inak než zmenou konfigurácie a reštartom; kým sú nastavené, sú to plnohodnotné prístupy bez záznamu o vydaní. Vydané kreditívy nemajú expiráciu, iba odobranie. Výmena kódu nemá rate limiting — kód má vyše sto bitov entropie, takže hádanie nie je cesta, ale keby sa mal kód niekedy zadávať rukou, a teda skrátiť, rate limiting sa stane podmienkou. Rotácia tokenu je dnes „vydaj nový, odober starý", nie samostatný tok.

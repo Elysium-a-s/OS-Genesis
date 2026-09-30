@@ -131,6 +131,7 @@ impl Ledger {
         connection.execute_batch(crate::grant::SCHEMA)?;
         crate::grant::migrate(&connection)?;
         connection.execute_batch(crate::voice::SCHEMA)?;
+        connection.execute_batch(crate::identity::SCHEMA)?;
         Ok(Self { connection })
     }
 

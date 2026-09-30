@@ -11,6 +11,7 @@ use genesis_core::{
     grant::{self, AccessState},
     ha::{self, HaConfig, Inventory},
     ha_command::{self, ExecutionError},
+    identity::{self, Role},
     ledger::{Actor, ActorType, CommandRequest, Ledger, LedgerError, Snapshot},
     voice,
 };
@@ -129,12 +130,7 @@ fn parse_sensitive_devices(raw: &str) -> Result<Vec<String>, String> {
         .map(str::trim)
         .filter(|entry| !entry.is_empty())
     {
-        if entry.len() > 128
-            || !entry.as_bytes()[0].is_ascii_alphanumeric()
-            || !entry
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
-        {
+        if !valid_opaque_id(entry) {
             return Err(
                 "GENESIS_SENSITIVE_DEVICES must be a comma-separated list of device ids".to_owned(),
             );
@@ -142,6 +138,17 @@ fn parse_sensitive_devices(raw: &str) -> Result<Vec<String>, String> {
         devices.push(entry.to_owned());
     }
     Ok(devices)
+}
+
+/// Rovnaké pravidlo pre identifikátor, aké prijme ledger. Čo by neprešlo tam,
+/// nemá zmysel pustiť ani sem.
+fn valid_opaque_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
 }
 
 #[derive(Clone)]
@@ -181,6 +188,13 @@ fn app(state: AppState) -> Router {
             axum::routing::post(voice_confirmation),
         )
         .route("/v1/voice/audit", get(voice_audit))
+        .route("/v1/pairings", axum::routing::post(create_pairing))
+        .route("/v1/pairings/redeem", axum::routing::post(redeem_pairing))
+        .route("/v1/credentials", get(list_credentials))
+        .route(
+            "/v1/credentials/{credential_id}",
+            axum::routing::delete(revoke_credential),
+        )
         .with_state(state)
 }
 
@@ -188,59 +202,86 @@ async fn devices(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ha::Device>>, StatusCode> {
-    principal(&headers, &state)?;
+    principal(&headers, &state).await?;
     Ok(Json(state.inventory.devices().await))
-}
-
-#[derive(Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum Role {
-    Owner,
-    Member,
-    Guest,
-    Service,
 }
 
 #[derive(Serialize)]
 struct Principal {
     household_id: String,
-    actor_id: &'static str,
+    actor_id: String,
     role: Role,
     can_control_devices: bool,
+    /// Vyplnené pri vydanej kreditíve. Tokeny z konfigurácie kreditívu nemajú,
+    /// pretože ich nikto nevydal — sú bootstrapom tejto jednotky.
+    credential_id: Option<String>,
 }
 
-fn principal(headers: &HeaderMap, state: &AppState) -> Result<Principal, StatusCode> {
+/// Kto požiadavku poslal.
+///
+/// Najprv sa skúšajú tokeny z konfigurácie; sú bootstrapom pilota a nesiahajú do
+/// databázy. Až potom sa hľadá vydaná kreditíva, a to podľa odtlačku, nie podľa
+/// tajomstva.
+async fn principal(headers: &HeaderMap, state: &AppState) -> Result<Principal, StatusCode> {
     let tokens = [
         (state.write_token.as_deref(), Role::Owner, "pilot-owner"),
         (state.member_token.as_deref(), Role::Member, "pilot-member"),
         (state.guest_token.as_deref(), Role::Guest, "pilot-guest"),
         (state.read_token.as_deref(), Role::Service, "pilot-service"),
     ];
-    if tokens.iter().all(|(token, _, _)| token.is_none()) {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
+    // Jednotka bez jediného nastaveného tokenu nie je nakonfigurovaná, nie
+    // neoprávnená; bez hlavičky sa to inak nedá rozlíšiť.
+    let configured = tokens.iter().any(|(token, _, _)| token.is_some());
     let supplied = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.as_bytes().strip_prefix(b"Bearer "))
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .ok_or(if configured {
+            StatusCode::UNAUTHORIZED
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        })?;
     for (token, role, actor_id) in tokens {
         if token.is_some_and(|value| supplied.ct_eq(value.as_bytes()).unwrap_u8() == 1) {
             return Ok(Principal {
                 household_id: state.household_id.clone(),
-                actor_id,
+                actor_id: actor_id.to_owned(),
                 role,
-                can_control_devices: matches!(role, Role::Owner | Role::Member),
+                can_control_devices: role.can_control_devices(),
+                credential_id: None,
             });
         }
     }
-    Err(StatusCode::UNAUTHORIZED)
+    // Zámok sa drží iba na dobu overenia a pustí sa pred návratom, aby ho mohla
+    // obsluha požiadavky vzápätí vziať znova.
+    let identity = {
+        let mut ledger = state.ledger.lock().await;
+        identity::authenticate(&mut ledger, &state.household_id, supplied, Utc::now()).map_err(
+            |error| {
+                tracing::error!(%error, "checking the presented credential failed");
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
+        )?
+    };
+    match identity {
+        Some(identity) => Ok(Principal {
+            household_id: identity.household_id,
+            actor_id: identity.actor_id,
+            role: identity.role,
+            can_control_devices: identity.role.can_control_devices(),
+            credential_id: Some(identity.credential_id),
+        }),
+        // Predložené tajomstvo nepatrí ani konfigurácii, ani žiadnej platnej
+        // kreditíve. Na nenakonfigurovanej jednotke to nie je otázka oprávnenia.
+        None if !configured => Err(StatusCode::SERVICE_UNAVAILABLE),
+        None => Err(StatusCode::UNAUTHORIZED),
+    }
 }
 
 async fn me(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Principal>, StatusCode> {
-    Ok(Json(principal(&headers, &state)?))
+    Ok(Json(principal(&headers, &state).await?))
 }
 
 /// Posledný potvrdený stav a otvorené incidenty časovo obmedzených grantov.
@@ -251,7 +292,7 @@ async fn access(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<AccessState>>, StatusCode> {
-    principal(&headers, &state)?;
+    principal(&headers, &state).await?;
     let ledger = state.ledger.lock().await;
     grant::overview(&ledger, &state.household_id)
         .map(Json)
@@ -267,6 +308,7 @@ async fn create_command(
     Json(input): Json<NewCommand>,
 ) -> Result<Json<Snapshot>, StatusCode> {
     let caller = authorized_controller(&headers, &state, &input.household_id)
+        .await
         .map_err(|refusal| refusal.status)?;
     let ha_config = state
         .ha_config
@@ -299,6 +341,142 @@ const MAX_TRANSCRIPT: usize = 200;
 
 /// Identifikátor potvrdenia je UUID; dlhší vstup netreba ani čítať.
 const MAX_CONFIRMATION_ID: usize = 64;
+
+/// Kód aj token majú 64 hexadecimálnych znakov; dlhší vstup netreba čítať.
+const MAX_SECRET: usize = 128;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewPairing {
+    household_id: String,
+    role: Role,
+    /// Koho bude vydaná kreditíva predstavovať. Vďaka tomu audit vie povedať
+    /// kto, nie iba akou rolou.
+    actor_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RedeemPairing {
+    household_id: String,
+    code: String,
+}
+
+/// Spustí párovanie a vráti jednorazový kód.
+///
+/// Kód je v odpovedi práve raz. Do logu nepatrí a v databáze je iba jeho
+/// odtlačok, takže ho Genesis už nikdy nevie zopakovať — kto ho stratí, spraví
+/// nové párovanie.
+async fn create_pairing(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<NewPairing>,
+) -> Result<(StatusCode, Json<identity::StartedPairing>), StatusCode> {
+    let owner = household_owner(&headers, &state).await?;
+    if input.household_id != state.household_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if !valid_opaque_id(&input.actor_id) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut ledger = state.ledger.lock().await;
+    let pairing = identity::start_pairing(
+        &mut ledger,
+        &state.household_id,
+        input.role,
+        &input.actor_id,
+        &owner.actor_id,
+        Utc::now(),
+    )
+    .map_err(map_identity_error)?;
+    tracing::info!(
+        pairing_id = %pairing.pairing_id,
+        role = pairing.role.as_str(),
+        actor_id = %pairing.actor_id,
+        "pairing started"
+    );
+    Ok((StatusCode::CREATED, Json(pairing)))
+}
+
+/// Vymení jednorazový kód za prístupový token.
+///
+/// Nepotrebuje token, pretože kód sám je oprávnenie. Nepoužiteľný kód vracia 422
+/// bez toho, aby prezradil, čo mu chýba: či neexistuje, uplynul, bol použitý
+/// alebo patrí inej domácnosti.
+async fn redeem_pairing(
+    State(state): State<AppState>,
+    Json(input): Json<RedeemPairing>,
+) -> Result<Json<identity::IssuedCredential>, StatusCode> {
+    if input.code.is_empty() || input.code.len() > MAX_SECRET {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut ledger = state.ledger.lock().await;
+    let issued = identity::redeem(&mut ledger, &input.household_id, &input.code, Utc::now())
+        .map_err(map_identity_error)?
+        .filter(|issued| issued.household_id == state.household_id)
+        .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    tracing::info!(
+        credential_id = %issued.credential_id,
+        role = issued.role.as_str(),
+        actor_id = %issued.actor_id,
+        "credential issued"
+    );
+    Ok(Json(issued))
+}
+
+/// Vydané kreditívy domácnosti. Token medzi nimi nie je, pretože ho Genesis
+/// nemá — v databáze je iba odtlačok.
+async fn list_credentials(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<identity::CredentialView>>, StatusCode> {
+    household_owner(&headers, &state).await?;
+    let ledger = state.ledger.lock().await;
+    identity::credentials(&ledger, &state.household_id)
+        .map(Json)
+        .map_err(map_identity_error)
+}
+
+/// Odoberie prístup. Ďalšia požiadavka s tým tokenom je 401.
+async fn revoke_credential(
+    State(state): State<AppState>,
+    Path(credential_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, StatusCode> {
+    let owner = household_owner(&headers, &state).await?;
+    if credential_id.is_empty() || credential_id.len() > MAX_SECRET {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut ledger = state.ledger.lock().await;
+    let revoked = identity::revoke(
+        &mut ledger,
+        &state.household_id,
+        &credential_id,
+        &owner.actor_id,
+        Utc::now(),
+    )
+    .map_err(map_identity_error)?;
+    if !revoked {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    tracing::info!(credential_id = %credential_id, "credential revoked");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Vlastník domácnosti. Párovanie ani odobranie prístupu nie je nič, čo by mal
+/// robiť člen, hosť alebo služba.
+async fn household_owner(headers: &HeaderMap, state: &AppState) -> Result<Principal, StatusCode> {
+    let caller = principal(headers, state).await?;
+    if caller.role != Role::Owner {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(caller)
+}
+
+fn map_identity_error(error: identity::IdentityError) -> StatusCode {
+    tracing::error!(%error, "the credential store failed");
+    StatusCode::INTERNAL_SERVER_ERROR
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -401,7 +579,7 @@ async fn voice_audit(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<voice::AuditEvent>>, StatusCode> {
-    principal(&headers, &state)?;
+    principal(&headers, &state).await?;
     let ledger = state.ledger.lock().await;
     voice::audit_trail(&ledger, &state.household_id)
         .map(Json)
@@ -434,20 +612,22 @@ fn answer(outcome: voice::Outcome) -> (StatusCode, Json<voice::Outcome>) {
 /// od anonymných volajúcich by sa dal beztrestne nafúknuť.
 struct ControlRefusal {
     status: StatusCode,
-    attributable: Option<(&'static str, &'static str)>,
+    attributable: Option<(String, &'static str)>,
 }
 
 /// Aktér, ktorý smie ovládať zariadenia v pilotnej domácnosti. Panel aj hlas
 /// prechádzajú touto kontrolou a identitu aktéra určuje server.
-fn authorized_controller(
+async fn authorized_controller(
     headers: &HeaderMap,
     state: &AppState,
     household_id: &str,
 ) -> Result<Actor, ControlRefusal> {
-    let caller = principal(headers, state).map_err(|status| ControlRefusal {
-        status,
-        attributable: None,
-    })?;
+    let caller = principal(headers, state)
+        .await
+        .map_err(|status| ControlRefusal {
+            status,
+            attributable: None,
+        })?;
     if !caller.can_control_devices {
         return Err(ControlRefusal {
             status: StatusCode::FORBIDDEN,
@@ -462,7 +642,7 @@ fn authorized_controller(
     }
     Ok(Actor {
         actor_type: ActorType::User,
-        actor_id: caller.actor_id.to_owned(),
+        actor_id: caller.actor_id,
     })
 }
 
@@ -473,7 +653,7 @@ async fn authorized_speaker(
     state: &AppState,
     household_id: &str,
 ) -> Result<Actor, StatusCode> {
-    match authorized_controller(headers, state, household_id) {
+    match authorized_controller(headers, state, household_id).await {
         Ok(actor) => Ok(actor),
         Err(refusal) => {
             if let Some((actor_id, reason)) = refusal.attributable {
@@ -481,7 +661,7 @@ async fn authorized_speaker(
                 voice::record_refusal(
                     &mut ledger,
                     &state.household_id,
-                    actor_id,
+                    &actor_id,
                     reason,
                     Utc::now(),
                 );
@@ -496,7 +676,7 @@ async fn get_command(
     Path(command_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<Snapshot>, StatusCode> {
-    principal(&headers, &state)?;
+    principal(&headers, &state).await?;
     let ledger = state.ledger.lock().await;
     let snapshot = ledger
         .get(&command_id)
@@ -1075,6 +1255,208 @@ mod tests {
 
         // Audit je chránený tokenom ako každé čítanie.
         assert_eq!(audit_trail(state, None).await.0, StatusCode::UNAUTHORIZED);
+    }
+
+    /// Jedna požiadavka s tokenom alebo bez neho, s telom alebo bez.
+    async fn call(
+        state: AppState,
+        method: &str,
+        uri: &str,
+        token: Option<&str>,
+        body: Option<String>,
+    ) -> (StatusCode, Value) {
+        let mut request = Request::builder().method(method).uri(uri);
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let request = match body {
+            Some(body) => request
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+            None => request.body(Body::empty()).unwrap(),
+        };
+        let response = app(state).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 16384).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn pairing_and_revocation_walk_the_whole_way() {
+        let mut state = test_state(Some("r".repeat(32)));
+        state.write_token = Some("o".repeat(32));
+        state.member_token = Some("m".repeat(32));
+        let owner = "o".repeat(32);
+        let wanted = serde_json::json!({
+            "household_id": "pilot-home",
+            "role": "member",
+            "actor_id": "lukas"
+        })
+        .to_string();
+
+        // Párovať smie iba vlastník.
+        for token in [None, Some("m".repeat(32)), Some("r".repeat(32))] {
+            let expected = if token.is_none() {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::FORBIDDEN
+            };
+            let status = call(
+                state.clone(),
+                "POST",
+                "/v1/pairings",
+                token.as_deref(),
+                Some(wanted.clone()),
+            )
+            .await
+            .0;
+            assert_eq!(status, expected);
+        }
+
+        let (status, pairing) = call(
+            state.clone(),
+            "POST",
+            "/v1/pairings",
+            Some(&owner),
+            Some(wanted),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let code = pairing["code"].as_str().unwrap().to_owned();
+        assert_eq!(pairing["role"], "member");
+        assert_eq!(pairing["actor_id"], "lukas");
+
+        // Kód tejto domácnosti nevydá prístup k inej.
+        let foreign =
+            serde_json::json!({"household_id": "other-home", "code": code.clone()}).to_string();
+        assert_eq!(
+            call(
+                state.clone(),
+                "POST",
+                "/v1/pairings/redeem",
+                None,
+                Some(foreign)
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        let redeem = serde_json::json!({"household_id": "pilot-home", "code": code}).to_string();
+        let (status, issued) = call(
+            state.clone(),
+            "POST",
+            "/v1/pairings/redeem",
+            None,
+            Some(redeem.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let token = issued["token"].as_str().unwrap().to_owned();
+        let credential_id = issued["credential_id"].as_str().unwrap().to_owned();
+
+        // Jednorazový kód sa druhýkrát vymeniť nedá.
+        assert_eq!(
+            call(
+                state.clone(),
+                "POST",
+                "/v1/pairings/redeem",
+                None,
+                Some(redeem)
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        // Vydaný token funguje a nesie svojho aktéra, nie zástupné meno roly.
+        let (status, me) = call(state.clone(), "GET", "/v1/me", Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(me["role"], "member");
+        assert_eq!(me["actor_id"], "lukas");
+        assert_eq!(me["household_id"], "pilot-home");
+        assert_eq!(me["credential_id"], credential_id);
+        assert_eq!(me["can_control_devices"], true);
+
+        // Vydaná kreditíva neovláda inú domácnosť, aj keď rolu na to má.
+        let elsewhere = serde_json::json!({
+            "household_id": "other-home",
+            "device_id": "ha:light.living",
+            "value": true,
+            "idempotency_key": "idem-cross",
+            "correlation_id": "corr-cross"
+        })
+        .to_string();
+        assert_eq!(
+            call(
+                state.clone(),
+                "POST",
+                "/v1/commands",
+                Some(&token),
+                Some(elsewhere)
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+
+        // Prehľad kreditív patrí vlastníkovi a token v ňom nie je.
+        assert_eq!(
+            call(state.clone(), "GET", "/v1/credentials", Some(&token), None)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, listed) =
+            call(state.clone(), "GET", "/v1/credentials", Some(&owner), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed[0]["credential_id"], credential_id);
+        assert_eq!(listed[0]["actor_id"], "lukas");
+        assert!(!serde_json::to_string(&listed).unwrap().contains(&token));
+
+        // Odobrať smie vlastník, a potom je ten token 401.
+        let path = format!("/v1/credentials/{credential_id}");
+        assert_eq!(
+            call(state.clone(), "DELETE", &path, Some(&token), None)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(state.clone(), "DELETE", &path, Some(&owner), None)
+                .await
+                .0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(state.clone(), "GET", "/v1/me", Some(&token), None)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(state, "DELETE", &path, Some(&owner), None).await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_unit_reports_unavailable_not_unauthorized() {
+        let state = test_state(None);
+        // Bez jediného nastaveného tokenu nie je čo autorizovať — ani keď
+        // hlavička chýba, ani keď niečo nesie.
+        for token in [None, Some("whatever")] {
+            assert_eq!(
+                call(state.clone(), "GET", "/v1/devices", token, None)
+                    .await
+                    .0,
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        }
     }
 
     #[tokio::test]
