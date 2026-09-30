@@ -34,7 +34,7 @@ Predpokladom je, že balík je pre Supervisor dostupný podľa jednej z dvoch ci
 
 1. V Home Assistant app obchode pridať URL repozitára `https://github.com/Elysium-a-s/OS-Genesis` (musí byť pre Supervisor dostupný).
 2. Nainštalovať **OS Genesis Pilot** a v nastaveniach vložiť dva rôzne náhodné tokeny `read_token` a `write_token`, každý s aspoň 32 znakmi.
-3. Spustiť app a otvoriť Health odkaz. V logoch skontrolovať `Home Assistant inventory loaded` po pripojení aspoň jedného svetla/zásuvky.
+3. Spustiť app a otvoriť Genesis panel z odkazu v HA. V paneli zadať serverový prístupový token a načítať inventár. V logoch skontrolovať `Home Assistant inventory loaded` po pripojení aspoň jedného svetla/zásuvky.
 4. Reštartovať HA Green a overiť automatický štart, zachovanie databázy a aktuálny inventár.
 5. Zaznamenať CPU/RAM a logy pred reštartom a po ňom; tajomstvá z logov nezdieľať.
 
