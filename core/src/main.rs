@@ -273,9 +273,7 @@ async fn panel_home(State(state): State<AppState>, headers: HeaderMap) -> Html<S
         })
         .map(|path| format!("{}/", path.trim_end_matches('/')))
         .unwrap_or_else(|| "/".to_owned());
-    Html(
-        html.replacen("<base href=\"/\">", &format!("<base href=\"{base}\">"), 1),
-    )
+    Html(html.replacen("<base href=\"/\">", &format!("<base href=\"{base}\">"), 1))
 }
 
 async fn ingress_guard(
@@ -1677,7 +1675,10 @@ mod tests {
             "<base href=\"/\"><script src=\"flutter_bootstrap.js\"></script>".to_owned(),
         ));
         let mut headers = HeaderMap::new();
-        headers.insert("x-ingress-path", "/api/hassio_ingress/pilot".parse().unwrap());
+        headers.insert(
+            "x-ingress-path",
+            "/api/hassio_ingress/pilot".parse().unwrap(),
+        );
         let Html(html) = panel_home(State(state.clone()), headers).await;
         assert!(html.contains("<base href=\"/api/hassio_ingress/pilot/\">"));
 
