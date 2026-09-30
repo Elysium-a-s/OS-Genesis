@@ -13,6 +13,7 @@ Sem patria potvrdené rozhodnutia architektúry, postup nasadenia, prevádzka a 
 ## Prevádzka
 
 - [ELYSIUM-348 — záloha, aktualizácia a obnova](ELYSIUM-348-obnova.md): postup pre prevádzkovateľa, čo Genesis po reštarte urobí sám, a čo nie je odmerané.
+- [ELYSIUM-352 — inštalácia, aktualizácia a rollback HA app](ELYSIUM-352-instalacia.md): zvolená distribučná cesta, prečo Supervisor novú verziu nevidí hneď, a prečo rollback potrebuje zálohu spravenú pred aktualizáciou.
 
 ## Protokoly
 
