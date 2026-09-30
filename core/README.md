@@ -28,6 +28,7 @@ Očakávaná odpoveď: HTTP 200, `Content-Type: application/json`, telo s `statu
 | `GENESIS_MEMBER_TOKEN` | nenastavené | Voliteľný member token s aspoň 32 znakmi. Umožňuje čítanie a ovládanie. |
 | `GENESIS_GUEST_TOKEN` | nenastavené | Voliteľný guest token s aspoň 32 znakmi. Umožňuje iba čítanie. |
 | `GENESIS_HOUSEHOLD_ID` | `pilot-home` | Jediná povolená pilotná domácnosť. |
+| `GENESIS_BACKUP_DIR` | nenastavené | Priečinok pre zálohy databázy. Bez neho vracia `POST /v1/backup` 503. V Home Assistant app patrí pod perzistentné `/data`. |
 | `GENESIS_SENSITIVE_DEVICES` | nenastavené | Zoznam `device_id` oddelený čiarkou, ktoré prevádzkovateľ označil za citlivé. Hlasová akcia na nich vyžaduje potvrdenie. Neplatná hodnota zastaví štart. |
 
 Všetky nastavené prístupové tokeny musia byť navzájom odlišné. `GET /v1/me` vráti serverom určenú domácnosť, aktéra, rolu a `can_control_devices`. `POST /v1/commands` vracia guest/service role 403; `household_id` mimo pilotnej domácnosti je zamietnuté. Tokeny z konfigurácie sú **bootstrap tejto jednotky**: jeden na rolu, takže konkrétnych členov v rovnakej role nerozlišujú. Aktérov na osobu vydáva párovanie nižšie. Pri expozícii mimo dôveryhodnej LAN je potrebné TLS a autentifikovaný prístupový kanál.
@@ -214,3 +215,17 @@ Kreditíva nesie domácnosť, pre ktorú bola vydaná. Jednotka prijme iba kredi
 ### Limity
 
 Tokeny z konfigurácie zostávajú a sú prvé v poradí — sú bootstrapom, ktorým vlastník vôbec spustí prvé párovanie, a pilotný Home Assistant app ich nastavuje v možnostiach. Odobrať sa nedajú inak než zmenou konfigurácie a reštartom; kým sú nastavené, sú to plnohodnotné prístupy bez záznamu o vydaní. Vydané kreditívy nemajú expiráciu, iba odobranie. Výmena kódu nemá rate limiting — kód má vyše sto bitov entropie, takže hádanie nie je cesta, ale keby sa mal kód niekedy zadávať rukou, a teda skrátiť, rate limiting sa stane podmienkou. Rotácia tokenu je dnes „vydaj nový, odober starý", nie samostatný tok.
+
+## Záloha, aktualizácia a obnova
+
+Celý stav Genesis je jeden SQLite súbor: povely a ich audit, granty, hlasové záznamy a vydané kreditívy. Postup aj to, čo Genesis po reštarte urobí sám, je v [docs/ELYSIUM-348-obnova.md](../docs/ELYSIUM-348-obnova.md).
+
+`POST /v1/backup` s owner tokenom vypíše konzistentnú kópiu do `GENESIS_BACKUP_DIR` a vráti cestu a veľkosť. Kópia vzniká cez SQLite `VACUUM INTO`, takže je celá a platná aj vtedy, keď sa práve zapisuje — **`cp` za behu nie je záloha**. Existujúci súbor sa neprepíše. Záloha je plnohodnotná databáza, takže sa dá otvoriť a overiť bez obnovy.
+
+Obnovu robí prevádzkovateľ pri zastavenej službe; Genesis ju úmyselne nevie spustiť sám, pretože podsunúť si súbor pod otvoreným spojením je cesta k poškodeniu.
+
+Databáza si pamätá verziu schémy v `PRAGMA user_version`. Aktualizácia si schému doplní pri otvorení a nič nemaže. **Staršia verzia novšiu databázu odmietne otvoriť** namiesto toho, aby pracovala s obsahom, o ktorom nevie — rollback preto znamená obnoviť zálohu spravenú pred aktualizáciou.
+
+Po štarte sa otvorené povely zosúladia: granty si svoje prevezme `grant::resume` (incident a rozhodnutie o stave), ostatné — z panela a z hlasu — doberie `Ledger::adopt_interrupted` a prizná ich ako `unknown` s dôvodom `interrupted_before_result`. Žiadny sa nevydáva za vykonaný.
+
+**Čas návratu nie je odmeraný.** Je to pilotné meranie na Home Assistant Green; čo presne merať, je v odkazovanom dokumente. Rovnako nie je overená obnova po skutočnom výpadku napájania a záloha nemá plán ani rotáciu — endpoint ju vytvorí, ale sám sa nevolá.

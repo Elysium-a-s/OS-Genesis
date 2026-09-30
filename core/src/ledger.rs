@@ -92,7 +92,20 @@ pub enum LedgerError {
     NotFound,
     #[error("invalid command status transition or evidence")]
     InvalidTransition,
+    #[error(
+        "the database was written by a newer Genesis (schema {found}, this build knows {known})"
+    )]
+    SchemaTooNew { found: i64, known: i64 },
 }
+
+/// Verzia schémy, ktorú tento binár rozumie.
+///
+/// Zapisuje sa do `PRAGMA user_version` a číta pri každom otvorení. Zmysel má
+/// pri rollbacku: staršia verzia nesmie potichu pracovať s novšou databázou,
+/// pretože by o jej obsahu nevedela — a to je presne cesta, ako sa stratia
+/// aktívne pravidlá. Zábrana platí od tejto verzie dopredu; databázy, ktoré
+/// vznikli pred ňou, majú nulu a berú sa ako „táto verzia".
+pub const SCHEMA_VERSION: i64 = 1;
 
 pub struct Ledger {
     connection: Connection,
@@ -110,6 +123,13 @@ impl Ledger {
     }
 
     fn initialize(connection: Connection) -> Result<Self, LedgerError> {
+        let found: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if found > SCHEMA_VERSION {
+            return Err(LedgerError::SchemaTooNew {
+                found,
+                known: SCHEMA_VERSION,
+            });
+        }
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
              CREATE TABLE IF NOT EXISTS commands (
@@ -132,7 +152,55 @@ impl Ledger {
         crate::grant::migrate(&connection)?;
         connection.execute_batch(crate::voice::SCHEMA)?;
         connection.execute_batch(crate::identity::SCHEMA)?;
+        // Verzia sa zapíše až po tom, čo schéma naozaj existuje. Keby zápis
+        // predchádzal, prerušené otvorenie by nechalo databázu označenú za
+        // hotovú bez toho, aby bola.
+        connection.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
         Ok(Self { connection })
+    }
+
+    /// Prevezme povely, ktoré pri štarte zostali bez výsledku.
+    ///
+    /// Po štarte nie je nič na ceste: čo zostalo v `accepted` alebo `sent`, už
+    /// výsledok nedostane. Prizná sa ako `unknown`, aby otvorený povel nezostal
+    /// navždy otvorený a aby prehľad nehovoril, že sa niečo práve deje.
+    ///
+    /// Granty si svoje povely preberajú samy (`grant::resume`) a robia pri tom
+    /// viac — zakladajú incident a rozhodujú o stave grantu — takže toto sa má
+    /// volať **po** nich, nie pred; inak by grant našiel povel už uzavretý a
+    /// incident by nevznikol.
+    pub fn adopt_interrupted(
+        &mut self,
+        actor: Actor,
+        reason: &str,
+    ) -> Result<Vec<String>, LedgerError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT command_id, snapshot_json FROM commands ORDER BY command_id")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut interrupted = Vec::new();
+        for row in rows {
+            let (command_id, raw) = row?;
+            let snapshot: Snapshot = serde_json::from_str(&raw)?;
+            if matches!(snapshot.status, Status::Accepted | Status::Sent) {
+                interrupted.push(command_id);
+            }
+        }
+        drop(statement);
+        let mut adopted = Vec::new();
+        for command_id in interrupted {
+            self.transition(
+                &command_id,
+                Status::Unknown,
+                actor.clone(),
+                None,
+                Some(reason.to_owned()),
+            )?;
+            adopted.push(command_id);
+        }
+        Ok(adopted)
     }
 
     /// Časovo obmedzené granty žijú v tej istej databáze ako povely, na ktoré sa
@@ -483,6 +551,82 @@ mod tests {
             )
             .unwrap();
         assert_eq!(confirmed.confirmation_level, "device");
+    }
+
+    #[test]
+    fn a_database_from_a_newer_genesis_is_refused() {
+        let path =
+            std::env::temp_dir().join(format!("genesis-schema-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let ledger = Ledger::open(&path).unwrap();
+            let stored: i64 = ledger
+                .connection()
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(stored, SCHEMA_VERSION);
+            // Tvárime sa, že databázu zapísala novšia verzia.
+            ledger
+                .connection()
+                .execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION + 1))
+                .unwrap();
+        }
+        // Staršia verzia nesmie potichu pracovať s novšou databázou; radšej sa
+        // nespustí, než by o polovici obsahu nevedela.
+        assert!(matches!(
+            Ledger::open(&path),
+            Err(LedgerError::SchemaTooNew { .. })
+        ));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn commands_left_in_flight_are_adopted_as_unknown() {
+        let mut ledger = Ledger::in_memory().unwrap();
+        ledger.accept(request()).unwrap();
+        let mut settled = request();
+        settled.command_id = "cmd-2".to_owned();
+        settled.idempotency_key = "idem-2".to_owned();
+        ledger.accept(settled).unwrap();
+        ledger
+            .transition("cmd-2", Status::Sent, actor(), None, None)
+            .unwrap();
+        ledger
+            .transition(
+                "cmd-2",
+                Status::DeviceConfirmed,
+                actor(),
+                Some(Evidence {
+                    kind: EvidenceKind::DeviceObservation,
+                    reference: "obs-1".to_owned(),
+                    at: now_utc(),
+                }),
+                None,
+            )
+            .unwrap();
+
+        let adopted = ledger
+            .adopt_interrupted(actor(), "interrupted_before_result")
+            .unwrap();
+        assert_eq!(adopted, ["cmd-1"]);
+        assert_eq!(
+            ledger.get("cmd-1").unwrap().unwrap().status,
+            Status::Unknown
+        );
+        assert_eq!(
+            ledger.get("cmd-1").unwrap().unwrap().reason.as_deref(),
+            Some("interrupted_before_result")
+        );
+        // Uzavretý povel sa nedotkol.
+        assert_eq!(
+            ledger.get("cmd-2").unwrap().unwrap().status,
+            Status::DeviceConfirmed
+        );
+        // Druhý štart už nemá čo preberať.
+        assert!(ledger
+            .adopt_interrupted(actor(), "interrupted_before_result")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
