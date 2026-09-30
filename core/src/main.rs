@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
-use tracing_subscriber::EnvFilter;
 use tower_http::services::ServeDir;
+use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 struct Config {
