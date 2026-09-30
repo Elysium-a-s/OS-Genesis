@@ -6,7 +6,7 @@ Home Assistant app používa `homeassistant_api: true` a interný WebSocket prox
 
 ## Flutter panel v HA app
 
-CI pred zostavením ARM64 obrazu zostaví a otestuje Flutter web panel. Obraz obsahuje statické súbory v `/usr/share/genesis-panel`; webové UI sa otvára na `http://<IP-Green>:8765/` a používa API na tej istej adrese. Watchdog ostáva na `/health`. Zadaný prístupový token zostáva v pamäti otvoreného panelu a neposiela sa v URL. Samotný CI smoke test nie je dôkazom behu na Green ani fyzickom iPade.
+CI pred zostavením ARM64 obrazu zostaví a otestuje Flutter web panel. Obraz obsahuje statické súbory v `/usr/share/genesis-panel`. Od verzie `0.1.2` sa webové UI otvára cez **OPEN WEB UI** v Home Assistante, vrátane vzdialeného prístupu do HA. HA Ingress sprostredkuje prihlásenie a smeruje panel aj API pod jedným prefixom; Genesis naďalej vyžaduje vlastný prístupový token pre inventár a povely. Port 8765 sa v tejto verzii už nepublikuje na hostiteľa. Watchdog ostáva na `/health`. Zadaný prístupový token zostáva v pamäti otvoreného panelu a neposiela sa v URL. Samotný CI smoke test nie je dôkazom behu na Green ani fyzickom iPade.
 
 ## Stav distribúcie
 
@@ -19,23 +19,16 @@ Publikujú sa dve značky:
 - `sha-<commit>` — nemenná, vzniká pri každom pushi do `main`. Slúži na dohľadanie, čo presne beží.
 - `<version>` — vydanie. **Nikdy sa neprepisuje.** Ak verzia v registri už je, workflow značku neposunie a napíše varovanie. Je to zámer: Supervisor rozhoduje o aktualizácii podľa čísla verzie, takže vymeniť obsah pod tým istým číslom znamená, že prevádzkovateľ opravu nikdy nedostane — jednotka si bude myslieť, že je aktuálna. Vydanie preto znamená zvýšiť `version` v `genesis/config.yaml`.
 
-### Čo ešte chýba k inštalácii
+### Inštalácia a overenie
 
-Publikovanie samo o sebe ešte nestačí. Repozitár je súkromný, takže **balík v GHCR je tiež súkromný** a Supervisor ho bez prihlásenia nestiahne. Sú dve cesty a treba sa rozhodnúť:
-
-1. Zverejniť balík `os-genesis-pilot` v nastaveniach GitHub Packages. Obraz potom stiahne kdokoľvek; kód v súkromnom repozitári zostáva.
-2. Nechať balík súkromný a pridať Supervisoru prihlasovacie údaje k `ghcr.io`. Supervisor to podporuje — drží si prihlasovacie údaje per registry ([`supervisor/api/docker.py`](https://github.com/home-assistant/supervisor/blob/main/supervisor/api/docker.py): `POST /docker/registry` s `{hostname: {username, password}}`, výpis cez `/docker/registries`). Token treba zaobchádzať ako s tajomstvom a nedávať ho do Gitu.
-
-**Inštalácia na Home Assistant Green nie je overená.** Obraz je testovaný iba v GitHub CI emulácii; či ho Supervisor na skutočnom Green stiahne a spustí, nikto zatiaľ neskúšal — patrí to k ELYSIUM-350. Reálny Green, obnova po reštarte HA OS, skutočné zariadenie a merania CPU/RAM na hardvéri sú otvorené akceptačné kroky Jira ELYSIUM-338 a ELYSIUM-336.
+Repozitár aj GHCR balík `os-genesis-pilot` sú verejne dostupné na čítanie. Verziu `0.1.1` už Supervisor na Home Assistant Green stiahol; Ingress vo verzii `0.1.2` ešte treba overiť na skutočnom Green a cez vzdialené prihlásenie do HA. Obnova po reštarte HA OS, skutočné zariadenie a merania CPU/RAM zostávajú otvorené akceptačné kroky Jira ELYSIUM-338 a ELYSIUM-336.
 
 ## Kroky inštalácie
 
-Predpokladom je, že balík je pre Supervisor dostupný podľa jednej z dvoch ciest vyššie.
-
 1. V Home Assistant app obchode pridať URL repozitára `https://github.com/Elysium-a-s/OS-Genesis` (musí byť pre Supervisor dostupný).
-2. Nainštalovať **OS Genesis Pilot** a v nastaveniach vložiť dva rôzne náhodné tokeny `read_token` a `write_token`, každý s aspoň 32 znakmi.
-3. Spustiť app a otvoriť Genesis panel z odkazu v HA. V paneli zadať serverový prístupový token a načítať inventár. V logoch skontrolovať `Home Assistant inventory loaded` po pripojení aspoň jedného svetla/zásuvky.
+2. Nainštalovať **OS Genesis Pilot** a v nastaveniach vložiť dva rôzne náhodné tokeny `read_token` a `write_token`, každý s aspoň 32 znakmi. `member_token` a `guest_token` môžu zostať prázdne.
+3. Spustiť app a kliknúť na **OPEN WEB UI** z lokálneho alebo vzdialeného HA. Panel automaticky použije adresu Ingressu. V paneli zadať Genesis `write_token` a načítať inventár. V logoch skontrolovať `Home Assistant inventory loaded` po pripojení aspoň jedného svetla/zásuvky.
 4. Reštartovať HA Green a overiť automatický štart, zachovanie databázy a aktuálny inventár.
 5. Zaznamenať CPU/RAM a logy pred reštartom a po ňom; tajomstvá z logov nezdieľať.
 
-HTTP port 8765 je určený iba pre dôveryhodnú domácu sieť. Nepresmerovávajte ho na verejný internet.
+Pôvodný HTTP port 8765 sa vo verzii `0.1.2` nepublikuje. Pri aktualizácii HA app sa externé presmerovanie portu musí odstrániť, ak ho niekto nastavil ručne.
