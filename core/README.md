@@ -28,6 +28,7 @@ Očakávaná odpoveď: HTTP 200, `Content-Type: application/json`, telo s `statu
 | `GENESIS_MEMBER_TOKEN` | nenastavené | Voliteľný member token s aspoň 32 znakmi. Umožňuje čítanie a ovládanie. |
 | `GENESIS_GUEST_TOKEN` | nenastavené | Voliteľný guest token s aspoň 32 znakmi. Umožňuje iba čítanie. |
 | `GENESIS_HOUSEHOLD_ID` | `pilot-home` | Jediná povolená pilotná domácnosť. |
+| `GENESIS_SENSITIVE_DEVICES` | nenastavené | Zoznam `device_id` oddelený čiarkou, ktoré prevádzkovateľ označil za citlivé. Hlasová akcia na nich vyžaduje potvrdenie. Neplatná hodnota zastaví štart. |
 
 Všetky nastavené prístupové tokeny musia byť navzájom odlišné. `GET /v1/me` vráti serverom určenú domácnosť, aktéra, rolu a `can_control_devices`. `POST /v1/commands` vracia guest/service role 403; `household_id` mimo pilotnej domácnosti je zamietnuté. Pilot používa jeden token na rolu, preto zatiaľ nerozlišuje konkrétnych členov v rovnakej role. Vydávanie tokenov a ich revokácia sú predmetom ELYSIUM-347. Pri expozícii mimo dôveryhodnej LAN je potrebné TLS a autentifikovaný prístupový kanál.
 
@@ -150,6 +151,32 @@ Prevod je deterministický: uzavretý zoznam slov, žiadny model. Text sa preved
 
 Vykonaný povel vracia 200 s intentom a snapshotom povelu. Nejednoznačný povel vracia **422**, nie 200 — klient ho nesmie pochopiť ako vykonaný — s dôvodom `unrecognised_action`, `conflicting_action`, `no_matching_device` alebo `several_matching_devices`; pri poslednom aj so zariadeniami, medzi ktorými sa Genesis nerozhodol, aby sa dalo doplniť otázku. Samotné sloveso bez cieľa neprepne ani jediné zariadenie.
 
+Každý výsledok nesie `outcome` a vetu pre používateľa: `executed`, `confirmation_required`, `unclear` alebo `refused`. Pri odmietnutí je kód v `reason` (nejednoznačnosť) alebo v `explanation.code` (ostatné); je to ten istý druh údaja na dvoch miestach, pretože nejednoznačnosť nesie aj zariadenia, medzi ktorými sa nerozhodlo.
+
+### Citlivé akcie a potvrdenie
+
+Citlivá akcia sa nevykoná na prvé slovo. Genesis ju odloží, vráti **202** s `confirmation_id`, typovaným intentom a časom platnosti, a čaká, kým ju ten istý oprávnený člen výslovne potvrdí na `POST /v1/voice/confirmations`:
+
+```json
+{ "household_id": "pilot-home", "confirmation_id": "…" }
+```
+
+Čo je citlivé, rozhoduje prevádzkovateľ cez `GENESIS_SENSITIVE_DEVICES`: Genesis nevie, čo je za zásuvkou, vie to ten, kto ju zapojil. Nad tým platí zoznam vlastne citlivých domén Home Assistanta (`lock.`, `cover.`, `valve.`, `water_heater.`, `climate.`, `alarm_control_panel.`); pilot mapuje iba `light.` a `switch.`, takže dnes môže citlivé zariadenie vzniknúť **iba deklaráciou**. Citlivé je oboje — zapnutie aj vypnutie; univerzálny bezpečný smer neexistuje, bojler je nebezpečné zapnúť aj vypnúť.
+
+Potvrdenie platí dve minúty, presne raz a iba pre aktéra, ktorý o akciu požiadal. Označí sa za použité **pred** vykonaním, takže po neistom výsledku treba povel povedať znova; opakovateľné potvrdenie by bolo horšie než druhé vyslovenie. Prepis, ktorý si odložená akcia so súhlasom držala, sa po použití alebo expirácii zahodí — potvrdenie, ktoré už nemôže nič vykonať, nemá dôvod držať slová.
+
+### Vysvetlenie výsledku
+
+Odpoveď rozlišuje odoslanie od potvrdenia. `explanation.code` kopíruje stav povelu v ledgeri (`sent`, `provider_confirmed`, `device_confirmed`, `unknown`, `failed`) a `explanation.message` je veta, ktorú môže hlasové rozhranie povedať. Žiadna z nich netvrdí viac, než ledger vie: `sent` neznie ako hotovo a `unknown` neznie ako zlyhanie.
+
+### Audit
+
+`GET /v1/voice/audit` vracia posledných 200 rozhodnutí domácnosti: kto, čo sa rozhodlo (`executed`, `awaiting_confirmation`, `refused`), prečo, a keď je to známe, zariadenie a povel. Stačí ktorýkoľvek platný token, pretože je to čítanie.
+
+Záznam **neobsahuje prepis ani identifikátor potvrdenia**, a nemá na ne ani stĺpec. Dôvod je vždy kód zo zatvoreného zoznamu, nikdy text od používateľa. Audit býva presnejší než odpoveď: potvrdenie, ktoré patrí inému aktérovi, sa zapíše ako `foreign_confirmation`, ale volajúcemu sa povie iba `unknown_confirmation` — že taký identifikátor existuje, sa dozvedieť nemá.
+
+Zapisujú sa aj zamietnutia, ktoré padnú ešte pred spracovaním povelu (`role_not_permitted`, `other_household`). Požiadavka **bez platného tokenu** záznam nevytvorí: Genesis nevie, komu by ho pripísal, a audit plnený anonymnými volajúcimi by sa dal beztrestne nafúknuť.
+
 ### Súhlas a prepis
 
 Prepis sa **neukladá ani nezapisuje do logov**. Uloží sa iba vtedy, keď požiadavka nesie `store_transcript: true`, teda keď používateľ súhlas dal, a aj potom len k povelu, ktorý sa naozaj vykonal. Nejednoznačný povel neuloží nič — nevznikne povel, záznam o hlase ani prepis.
@@ -158,4 +185,4 @@ Prepis sa **neukladá ani nezapisuje do logov**. Uloží sa iba vtedy, keď pož
 
 ### Limity
 
-Zoznam slov je uzavretý a pokrýva slovenské rozkazovacie formy zapnutia a vypnutia plus anglické `turn/switch on|off`; synonymá, iné jazyky a iné akcie než `power` nie sú podporované. Miestnosti a skupiny Genesis nepozná, pozná iba názvy zariadení z Home Assistanta, takže povel bez názvu alebo druhu zariadenia sa nevykoná. Odmietnutý povel neukladá nič, takže z neho nie je z čoho zlepšovať rozpoznávanie. Zapojenie na skutočný Home Assistant Assist ani hlasový povel na fyzickom zariadení zatiaľ neboli overené; patrí to k pilotu na Home Assistant Green.
+Zoznam slov je uzavretý a pokrýva slovenské rozkazovacie formy zapnutia a vypnutia plus anglické `turn/switch on|off`; synonymá, iné jazyky a iné akcie než `power` nie sú podporované. Pilot má jeden token na rolu, takže „ten istý člen" znamená tá istá rola — dvoch členov zdieľajúcich token Genesis nerozlíši; to odpadne až s vydávaním tokenov (ELYSIUM-347). Či má citlivú akciu potvrdzovať prísnejšia rola než tá, ktorá o ňu požiadala, je produktové rozhodnutie a zostáva otvorené. Audit nemá retenciu, iba ohraničenú odpoveď. Miestnosti a skupiny Genesis nepozná, pozná iba názvy zariadení z Home Assistanta, takže povel bez názvu alebo druhu zariadenia sa nevykoná. Odmietnutý povel neukladá nič, takže z neho nie je z čoho zlepšovať rozpoznávanie. Zapojenie na skutočný Home Assistant Assist ani hlasový povel na fyzickom zariadení zatiaľ neboli overené; patrí to k pilotu na Home Assistant Green.
