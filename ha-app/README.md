@@ -19,9 +19,11 @@ Publikujú sa dve značky:
 - `sha-<commit>` — nemenná, vzniká pri každom pushi do `main`. Slúži na dohľadanie, čo presne beží.
 - `<version>` — vydanie. **Nikdy sa neprepisuje.** Ak verzia v registri už je, workflow značku neposunie a napíše varovanie. Je to zámer: Supervisor rozhoduje o aktualizácii podľa čísla verzie, takže vymeniť obsah pod tým istým číslom znamená, že prevádzkovateľ opravu nikdy nedostane — jednotka si bude myslieť, že je aktuálna. Vydanie preto znamená zvýšiť `version` v `genesis/config.yaml`.
 
+Obraz sa zostavuje aj pri zmene v `panel/`, nielen v `core/` a `ha-app/`. Panel je súčasťou obrazu, takže bez toho by sa jeho zmena overila na PR, ale po merge by sa do žiadneho obrazu nedostala — presne to sa stalo prekresleniu panelu do Elysium dizajnu, ktoré je v `main` od `c5bdd85`, ale vo verzii `0.1.2` nie je.
+
 ### Inštalácia a overenie
 
-Repozitár aj GHCR balík `os-genesis-pilot` sú verejne dostupné na čítanie. Verziu `0.1.1` už Supervisor na Home Assistant Green stiahol; Ingress vo verzii `0.1.2` ešte treba overiť na skutočnom Green a cez vzdialené prihlásenie do HA. Obnova po reštarte HA OS, skutočné zariadenie a merania CPU/RAM zostávajú otvorené akceptačné kroky Jira ELYSIUM-338 a ELYSIUM-336.
+Repozitár aj GHCR balík `os-genesis-pilot` sú verejne dostupné na čítanie. Verziu `0.1.1` už Supervisor na Home Assistant Green stiahol; Ingress vo verzii `0.1.2` ešte treba overiť na skutočnom Green a cez vzdialené prihlásenie do HA. Verzia `0.1.3` prináša panel v Elysium dizajne; na skutočnom Green ani na fyzickom iPade ho zatiaľ nikto nevidel. Obnova po reštarte HA OS, skutočné zariadenie a merania CPU/RAM zostávajú otvorené akceptačné kroky Jira ELYSIUM-338 a ELYSIUM-336.
 
 ## Kroky inštalácie
 
