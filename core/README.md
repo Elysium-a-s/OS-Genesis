@@ -154,6 +154,43 @@ Miestnosť nemá vlastný názov v Genesise; berie sa taká, aká je nastavená 
 
 Bez tohto sa dá prečítať iba povel, ktorého `command_id` už niekto má. Po obnovení panelu ani po reštarte jednotky ho nemá nikto, takže neistý povel by zostal ležať bez toho, aby sa o ňom niekto dozvedel.
 
+## Rozhodnutie Elysium Behavior
+
+`POST /v1/behavior/decisions` prijme verziovaný kontrakt z `contracts/behavior/v1/decision.schema.json` a vykoná ho ako časovo obmedzený grant. Nie je to endpoint pre domácnosť: volá ho Behavior engine, a preto má vlastný kanál, nie rolové tokeny.
+
+Kanál nesie tri veci, ktoré holý bearer token nenesie: **identitu** (ktorý kľúč podpísal), **integritu** (že telo po podpise nikto nezmenil) a **odolnosť voči zopakovaniu** (podpis staršieho tela prestane fungovať). Token je tajomstvo, ktoré stačí raz zahliadnuť v logu proxy a ovláda domácnosť; podpis sám nie je oprávnenie na nič iné než na to jedno telo v tom jednom okne.
+
+```
+POST /v1/behavior/decisions
+X-Genesis-Key-Id: behavior-1
+X-Genesis-Timestamp: 2026-09-30T18:00:00Z
+X-Genesis-Signature: <hex HMAC-SHA256>
+```
+
+Podpisuje sa kanonický text `v1:POST:/v1/behavior/decisions:<časová značka>:<telo>`. Verzia preto, aby sa tvar dal zmeniť bez toho, aby starý podpis zostal platný; cesta preto, aby sa podpis nedal preniesť na iný endpoint; časová značka preto, aby sa nedala vymeniť za novšiu. Značka smie byť najviac päť minút od času jednotky. Telo sa **neparsuje pred overením**: podpis pokrýva presne tie bajty, ktoré prišli, takže overiť znovu poskladaný JSON by znamenalo kontrolovať niečo iné.
+
+| premenná | |
+| --- | --- |
+| `GENESIS_BEHAVIOR_KEY_ID` | ktorý kľúč jednotka pozná; nie je to tajomstvo |
+| `GENESIS_BEHAVIOR_SECRET` | spoločné tajomstvo, aspoň 32 znakov |
+| `GENESIS_CENTRAL_UNIT_ID` | voliteľné; keď je nastavené, rozhodnutie adresované inej jednotke tej istej domácnosti sa odmietne |
+
+Obe Behavior premenné sa nastavujú spolu. Bez nich endpoint vracia 503 — jednotka bez prepojenia na Behavior nie je pokazená.
+
+Odpoveď nesie **aj odmietnutie, aj neistotu**, pretože Behavior si z „prešlo to" nesmie vyvodiť, že sa vo svete niečo stalo:
+
+| `outcome` | čo to znamená |
+| --- | --- |
+| `granted` | zariadenie zmenu potvrdilo |
+| `granted_unconfirmed` | prístup je otvorený, potvrdenie zariadením nedorazilo |
+| `not_executed` | povel sa nevykonal, prístup zostáva zavretý |
+| `withdrawn`, `nothing_to_withdraw` | výsledok `revert` rozhodnutia |
+| `refused` | rozhodnutie sa nevykonalo; `reason_code` a `detail` hovoria prečo |
+
+Snapshot povelu je v odpovedi celý, vrátane `unknown` a `failed`. Vykonané rozhodnutie vracia 200 aj vtedy, keď je výsledok neistý — požiadavka je spracovaná a v ledgeri; neistota je v tele, nie v stave. Odmietnutie je 4xx: 401 podpis, 403 cudzia domácnosť alebo iná jednotka, 409 zatvorené okno alebo nepodporovaná schopnosť, 400 pokazený kontrakt.
+
+Log z tohto endpointu obsahuje iba kategóriu odmietnutia. Ani podpis, ani telo, ani očakávanú hodnotu — z logu sa nemá dať zložiť platná požiadavka.
+
 ## Diagnostika
 
 `GET /v1/diagnostics` s ktorýmkoľvek platným tokenom vracia stav jednotky a **oddelene** stav prepojenia na Home Assistant:

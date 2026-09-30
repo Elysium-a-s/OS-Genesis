@@ -18,11 +18,13 @@ use axum::{
 use chrono::Utc;
 use genesis_core::{
     backup,
+    behavior_channel::{self, BehaviorChannel, SignedRequest},
+    behavior_decision::{BehaviorDecision, Operation},
     grant::{self, AccessState},
     ha::{self, HaConfig, Inventory, Link, LinkState, LinkStatus, Registry, RegistrySnapshot},
     ha_command::{self, ExecutionError},
     identity::{self, Role},
-    ledger::{Actor, ActorType, CommandRequest, Ledger, LedgerError, Snapshot},
+    ledger::{Actor, ActorType, CommandRequest, Ledger, LedgerError, Snapshot, Status},
     voice,
 };
 use serde::{Deserialize, Serialize};
@@ -213,6 +215,10 @@ struct AppState {
     ha_config: Option<HaConfig>,
     ha_link: Link,
     ha_registry: Registry,
+    behavior_channel: Option<Arc<BehaviorChannel>>,
+    /// Identita tejto jednotky. Keď je nastavená, rozhodnutie adresované inej
+    /// jednotke tej istej domácnosti sa odmietne.
+    central_unit_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -235,6 +241,10 @@ fn app(state: AppState) -> Router {
         .route("/v1/commands", get(list_commands).post(create_command))
         .route("/v1/commands/{command_id}", get(get_command))
         .route("/v1/diagnostics", get(diagnostics))
+        .route(
+            behavior_channel::DECISIONS_PATH,
+            axum::routing::post(behavior_decision),
+        )
         .route("/v1/access", get(access))
         .route("/v1/voice/commands", axum::routing::post(voice_command))
         .route(
@@ -1008,6 +1018,249 @@ async fn diagnostics(
     }))
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DecisionOutcome {
+    /// Zariadenie zmenu potvrdilo.
+    Granted,
+    /// Prístup je otvorený, ale potvrdenie zariadením nedorazilo. Zámerne to nie
+    /// je „granted": Behavior má vidieť, že fyzický výsledok nikto nepotvrdil.
+    GrantedUnconfirmed,
+    /// Povel sa nevykonal. Prístup zostáva zavretý.
+    NotExecuted,
+    Withdrawn,
+    /// `revert` na zariadení, na ktorom Genesis nemá čo zavrieť.
+    NothingToWithdraw,
+    Refused,
+}
+
+/// Odpoveď Behavioru na jedno rozhodnutie.
+///
+/// Nesie aj odmietnutie, aj neistotu. Behavior nesmie z odpovede „prešlo to"
+/// vyvodiť, že sa vo svete niečo stalo — to hovorí až `command.status`.
+#[derive(Serialize)]
+struct DecisionReceipt {
+    decision_id: String,
+    outcome: DecisionOutcome,
+    /// Stabilný kód, na ktorý sa Behavior môže naviazať.
+    reason_code: String,
+    /// Detail k odmietnutiu. Nikdy neobsahuje tajomstvo — sú to vlastné texty
+    /// kontraktu a grantov.
+    detail: Option<String>,
+    /// Stav prístupu po vykonaní, vrátane otvorených incidentov.
+    access: Option<AccessState>,
+    /// Snapshot povelu, ktorým sa to vykonalo, vrátane `unknown` a `failed`.
+    command: Option<Snapshot>,
+}
+
+fn refused(
+    status: StatusCode,
+    decision_id: &str,
+    reason_code: &str,
+    detail: Option<String>,
+) -> (StatusCode, Json<DecisionReceipt>) {
+    (
+        status,
+        Json(DecisionReceipt {
+            decision_id: decision_id.to_owned(),
+            outcome: DecisionOutcome::Refused,
+            reason_code: reason_code.to_owned(),
+            detail,
+            access: None,
+            command: None,
+        }),
+    )
+}
+
+fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+}
+
+/// Vykoná rozhodnutie Elysium Behavior.
+///
+/// Telo sa berie ako bajty, nie ako `Json`, pretože podpis pokrýva presne tie
+/// bajty, ktoré prišli. Keby ho axum najprv rozparsoval a Genesis podpisoval
+/// znovu poskladaný JSON, overenie by kontrolovalo niečo iné než to, čo
+/// odosielateľ podpísal — a to je diera, nie kontrola.
+async fn behavior_decision(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> (StatusCode, Json<DecisionReceipt>) {
+    let now = Utc::now();
+    let Some(channel) = state.behavior_channel.clone() else {
+        return refused(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "",
+            "behavior_channel_not_configured",
+            None,
+        );
+    };
+    let request = SignedRequest {
+        key_id: header_value(&headers, "x-genesis-key-id"),
+        timestamp: header_value(&headers, "x-genesis-timestamp"),
+        signature: header_value(&headers, "x-genesis-signature"),
+        path: behavior_channel::DECISIONS_PATH,
+        body: &body,
+    };
+    if let Err(error) = channel.verify(&request, now) {
+        // Loguje sa kategória. Ani podpis, ani telo, ani očakávaná hodnota:
+        // z logu sa nemá dať zložiť platná požiadavka.
+        tracing::warn!(
+            reason = error.reason_code(),
+            "a behavior decision was not accepted"
+        );
+        return refused(StatusCode::UNAUTHORIZED, "", error.reason_code(), None);
+    }
+
+    let Ok(raw) = std::str::from_utf8(&body) else {
+        return refused(
+            StatusCode::BAD_REQUEST,
+            "",
+            "decision_contract_invalid",
+            Some("body is not UTF-8".to_owned()),
+        );
+    };
+    let decision = match BehaviorDecision::parse(raw) {
+        Ok(decision) => decision,
+        Err(detail) => {
+            return refused(
+                StatusCode::BAD_REQUEST,
+                "",
+                "decision_contract_invalid",
+                Some(detail),
+            )
+        }
+    };
+    let decision_id = decision.decision_id.to_string();
+
+    if decision.household_id != state.household_id {
+        return refused(
+            StatusCode::FORBIDDEN,
+            &decision_id,
+            voice::OTHER_HOUSEHOLD,
+            None,
+        );
+    }
+    // Domácnosť môže mať viac jednotiek. Rozhodnutie adresované inej z nich sem
+    // nepatrí, a bez tejto kontroly by ho táto jednotka vykonala.
+    if let Some(unit) = state.central_unit_id.as_deref() {
+        if decision.central_unit_id.to_string() != unit {
+            return refused(
+                StatusCode::FORBIDDEN,
+                &decision_id,
+                "other_central_unit",
+                None,
+            );
+        }
+    }
+    // Genesis vykonáva jednu schopnosť. Rozhodnutie o inej sa nemá tváriť, že
+    // prešlo.
+    if decision.capability_id != "power" {
+        return refused(
+            StatusCode::CONFLICT,
+            &decision_id,
+            "capability_not_supported",
+            Some(decision.capability_id.clone()),
+        );
+    }
+    let Some(ha_config) = state.ha_config.clone() else {
+        return refused(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &decision_id,
+            "home_assistant_not_configured",
+            None,
+        );
+    };
+
+    let mut ledger = state.ledger.lock().await;
+    let executed = match decision.operation {
+        Operation::Apply => {
+            ha_command::apply_decision(&ha_config, &state.inventory, &mut ledger, &decision, now)
+                .await
+                .map(|grant| vec![grant])
+        }
+        Operation::Revert => {
+            ha_command::withdraw_decision(&ha_config, &state.inventory, &mut ledger, &decision, now)
+                .await
+        }
+    };
+    let grants = match executed {
+        Ok(grants) => grants,
+        Err(error) => {
+            let (status, reason) = map_grant_error(&error);
+            tracing::warn!(%decision_id, reason, "a behavior decision was refused");
+            return refused(status, &decision_id, reason, Some(error.to_string()));
+        }
+    };
+
+    if grants.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(DecisionReceipt {
+                decision_id,
+                outcome: DecisionOutcome::NothingToWithdraw,
+                reason_code: decision.reason_code,
+                detail: None,
+                access: None,
+                command: None,
+            }),
+        );
+    }
+
+    // Prehľad sa číta pre prvý grant; `revert` ich môže zavrieť viac, ale povel
+    // je jeden a stav prístupu je ten, o ktorý Behavior žiadal.
+    let grant = &grants[0];
+    let command_id = match decision.operation {
+        Operation::Apply => Some(grant.unlock_command_id.clone()),
+        Operation::Revert => grant.relock_command_id.clone(),
+    };
+    let command = command_id
+        .as_deref()
+        .and_then(|id| ledger.get(id).ok().flatten());
+    let access = grant::access_state(&ledger, &grant.decision_id)
+        .ok()
+        .flatten();
+    let outcome = match (&decision.operation, command.as_ref().map(|c| &c.status)) {
+        (Operation::Revert, _) => DecisionOutcome::Withdrawn,
+        (Operation::Apply, Some(Status::DeviceConfirmed)) => DecisionOutcome::Granted,
+        (Operation::Apply, Some(Status::Failed)) => DecisionOutcome::NotExecuted,
+        // `provider_confirmed`, `unknown`, aj povel, ktorý sa ešte nepohol: nikto
+        // nepotvrdil, že sa zariadenie zmenilo.
+        (Operation::Apply, _) => DecisionOutcome::GrantedUnconfirmed,
+    };
+    (
+        StatusCode::OK,
+        Json(DecisionReceipt {
+            decision_id,
+            outcome,
+            reason_code: decision.reason_code,
+            detail: None,
+            access,
+            command,
+        }),
+    )
+}
+
+/// Odmietnutie grantu na stav a stabilný kód.
+fn map_grant_error(error: &grant::GrantError) -> (StatusCode, &'static str) {
+    match error {
+        // Zatvorené okno, protikladný grant a pokazený kontrakt sem prichádzajú
+        // ako `Invalid`; pre Behavior je to jedna trieda — rozhodnutie sa
+        // nevykonalo a dôvod je v detaile.
+        grant::GrantError::Invalid(_) => (StatusCode::CONFLICT, "decision_not_applicable"),
+        grant::GrantError::NotFound => (StatusCode::NOT_FOUND, "grant_not_found"),
+        grant::GrantError::Ledger(LedgerError::IdempotencyConflict) => (
+            StatusCode::CONFLICT,
+            "idempotency_key_belongs_to_another_decision",
+        ),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "unit_error"),
+    }
+}
+
 fn map_execution_error(error: ExecutionError) -> StatusCode {
     match error {
         ExecutionError::UnknownDevice => StatusCode::NOT_FOUND,
@@ -1102,6 +1355,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LinkState::NotConfigured
     });
     let ha_registry = Registry::new();
+    let behavior_channel = BehaviorChannel::from_env()
+        .map_err(std::io::Error::other)?
+        .map(Arc::new);
+    if let Some(channel) = behavior_channel.as_ref() {
+        tracing::info!(key_id = channel.key_id(), "Behavior channel configured");
+    }
     if let Some(ha_config) = ha_config.clone() {
         tokio::spawn(ha::run(
             ha_config.clone(),
@@ -1133,6 +1392,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ha_config,
         ha_link,
         ha_registry,
+        behavior_channel,
+        central_unit_id: env::var("GENESIS_CENTRAL_UNIT_ID").ok(),
     });
     let router = with_ingress_guard(
         router,
@@ -1179,6 +1440,8 @@ mod tests {
             ha_config: None,
             ha_link: Link::default(),
             ha_registry: Registry::new(),
+            behavior_channel: None,
+            central_unit_id: None,
         }
     }
 
@@ -2148,6 +2411,372 @@ mod tests {
         let serialized = body.to_string();
         assert!(!serialized.contains("supervisor-token"));
         assert!(!serialized.contains("ws://"));
+    }
+
+    // --- ELYSIUM-355: Behavior rozhodnutie cez autentifikovaný kanál ---
+
+    const BEHAVIOR_SECRET: &str = "behavior-secret-of-at-least-32-chars";
+
+    fn behavior_state() -> AppState {
+        let mut state = test_state(Some("r".repeat(32)));
+        state.behavior_channel = Some(Arc::new(
+            BehaviorChannel::new("behavior-1".to_owned(), BEHAVIOR_SECRET.to_owned()).unwrap(),
+        ));
+        state
+    }
+
+    fn decision_body(
+        household_id: &str,
+        valid_from: &str,
+        expires_at: &str,
+        operation: &str,
+    ) -> String {
+        serde_json::json!({
+            "schema_version": "1.0",
+            "decision_id": "3f5a8c1e-9b2d-4c7a-8e1f-0d6b4a2c9e77",
+            "issuer": "behavior-engine",
+            "household_id": household_id,
+            "central_unit_id": "8c1f2d3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f",
+            "subject_id": "11111111-2222-3333-4444-555555555555",
+            "device_id": "ha:light.living",
+            "capability_id": "power",
+            "requested_value": true,
+            "operation": operation,
+            "valid_from": valid_from,
+            "expires_at": expires_at,
+            "reason_code": "goal_reward_unlock",
+            "idempotency_key": "behavior:3f5a8c1e",
+            "required_confirmation": "device"
+        })
+        .to_string()
+    }
+
+    /// Kontrakt žiada UTC so `Z`, nie s `+00:00` — inak `valid_from` a
+    /// `expires_at` neprejdú validáciou.
+    fn utc_z(moment: chrono::DateTime<Utc>) -> String {
+        moment.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    fn open_window() -> (String, String) {
+        let now = Utc::now();
+        (
+            utc_z(now - chrono::Duration::minutes(1)),
+            utc_z(now + chrono::Duration::hours(1)),
+        )
+    }
+
+    /// Podpíše a odošle rozhodnutie presne tak, ako to robí FastAPI klient.
+    async fn post_decision(
+        state: AppState,
+        body: &str,
+        sign_with: Option<&BehaviorChannel>,
+    ) -> (StatusCode, Value) {
+        let timestamp = Utc::now().to_rfc3339();
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(behavior_channel::DECISIONS_PATH)
+            .header("content-type", "application/json");
+        if let Some(channel) = sign_with {
+            request = request
+                .header("x-genesis-key-id", channel.key_id())
+                .header("x-genesis-timestamp", &timestamp)
+                .header(
+                    "x-genesis-signature",
+                    channel.sign_hex(
+                        behavior_channel::DECISIONS_PATH,
+                        &timestamp,
+                        body.as_bytes(),
+                    ),
+                );
+        }
+        let response = app(state)
+            .oneshot(request.body(Body::from(body.to_owned())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    type FakeSocket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+
+    async fn fake_send(socket: &mut FakeSocket, value: Value) {
+        use futures_util::SinkExt;
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                value.to_string().into(),
+            ))
+            .await
+            .unwrap();
+    }
+
+    async fn fake_read(socket: &mut FakeSocket) -> Value {
+        use futures_util::StreamExt;
+        let frame = socket.next().await.unwrap().unwrap();
+        serde_json::from_str(frame.to_text().unwrap()).unwrap()
+    }
+
+    /// Home Assistant, ktorý povel prijme a potvrdí zmenu na zariadení.
+    /// `calls` spočíta, koľko `call_service` naozaj odišlo — to je jediný spôsob,
+    /// ako dokázať, že duplikát neprepol zariadenie druhý raz.
+    fn confirming_home_assistant(
+        connections: usize,
+    ) -> (
+        HaConfig,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio_tungstenite::accept_async;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..connections {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut socket = accept_async(stream).await.unwrap();
+                fake_send(&mut socket, serde_json::json!({"type":"auth_required"})).await;
+                assert_eq!(fake_read(&mut socket).await["type"], "auth");
+                fake_send(&mut socket, serde_json::json!({"type":"auth_ok"})).await;
+                assert_eq!(fake_read(&mut socket).await["type"], "subscribe_events");
+                fake_send(
+                    &mut socket,
+                    serde_json::json!({"id":1,"type":"result","success":true}),
+                )
+                .await;
+                let command = fake_read(&mut socket).await;
+                assert_eq!(command["type"], "call_service");
+                counted.fetch_add(1, Ordering::SeqCst);
+                fake_send(&mut socket, serde_json::json!({"id":1,"type":"event","event":{"context":{"id":"ctx-1"},"data":{"entity_id":"light.living","new_state":{"state":"on"}}}})).await;
+                fake_send(&mut socket, serde_json::json!({"id":2,"type":"result","success":true,"result":{"context":{"id":"ctx-1"},"response":null}})).await;
+            }
+        });
+        (
+            HaConfig {
+                websocket_url: format!("ws://{address}/api/websocket"),
+                token: "ha-token".to_owned(),
+            },
+            calls,
+            server,
+        )
+    }
+
+    fn living_room_light() -> ha::Device {
+        ha::Device {
+            device_id: "ha:light.living".to_owned(),
+            provider: "home_assistant",
+            provider_device_ref: "light.living".to_owned(),
+            name: "Veľké svetlo".to_owned(),
+            capability_id: "power",
+            capability_type: "switch",
+            writable: true,
+            power: Some(false),
+            observed_at: Some("2026-09-30T09:05:00Z".to_owned()),
+            availability: ha::Availability::Online,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_signed_decision_opens_a_grant_and_the_duplicate_commands_nothing() {
+        use std::sync::atomic::Ordering;
+
+        let (ha_config, calls, server) = confirming_home_assistant(1);
+        let mut state = behavior_state();
+        state.ha_config = Some(ha_config);
+        state.inventory = Inventory::with(vec![living_room_light()]);
+        let channel =
+            BehaviorChannel::new("behavior-1".to_owned(), BEHAVIOR_SECRET.to_owned()).unwrap();
+        let (from, until) = open_window();
+        let body = decision_body("pilot-home", &from, &until, "apply");
+
+        let (status, receipt) = post_decision(state.clone(), &body, Some(&channel)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(receipt["outcome"], "granted");
+        assert_eq!(receipt["reason_code"], "goal_reward_unlock");
+        assert_eq!(receipt["command"]["status"], "device_confirmed");
+        // Potvrdený unlock posunie grant na `active`: prístup je otvorený a pri
+        // expirácii ho bude treba zavrieť.
+        assert_eq!(receipt["access"]["grant"]["state"], "active");
+        assert_eq!(receipt["access"]["grant"]["unlock_confirmed"], true);
+        let command_id = receipt["command"]["request"]["command_id"].clone();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Duplicitné doručenie: ten istý grant, ten istý povel, a k Home
+        // Assistantovi nešlo nič druhé.
+        let (status, again) = post_decision(state, &body, Some(&channel)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(again["command"]["request"]["command_id"], command_id);
+        assert_eq!(again["command"]["status"], "device_confirmed");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_decision_without_a_valid_signature_does_not_reach_the_ledger() {
+        let channel =
+            BehaviorChannel::new("behavior-1".to_owned(), BEHAVIOR_SECRET.to_owned()).unwrap();
+        let (from, until) = open_window();
+        let body = decision_body("pilot-home", &from, &until, "apply");
+
+        // Bez podpisu.
+        let state = behavior_state();
+        let (status, receipt) = post_decision(state.clone(), &body, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(receipt["outcome"], "refused");
+        assert_eq!(receipt["reason_code"], "signature_malformed");
+
+        // Podpísané iným tajomstvom.
+        let impostor = BehaviorChannel::new("behavior-1".to_owned(), "i".repeat(40)).unwrap();
+        let (status, receipt) = post_decision(state.clone(), &body, Some(&impostor)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(receipt["reason_code"], "signature_rejected");
+
+        // Platný podpis, ale telo sa po podpise zmenilo.
+        let timestamp = Utc::now().to_rfc3339();
+        let response = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(behavior_channel::DECISIONS_PATH)
+                    .header("content-type", "application/json")
+                    .header("x-genesis-key-id", "behavior-1")
+                    .header("x-genesis-timestamp", &timestamp)
+                    .header(
+                        "x-genesis-signature",
+                        channel.sign_hex(
+                            behavior_channel::DECISIONS_PATH,
+                            &timestamp,
+                            body.as_bytes(),
+                        ),
+                    )
+                    .body(Body::from(body.replace("light.living", "switch.boiler")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Nič z toho nezaložilo povel.
+        assert!(state
+            .ledger
+            .lock()
+            .await
+            .recent("pilot-home", 10)
+            .unwrap()
+            .is_empty());
+
+        // Jednotka bez Behavior kanála sa nehlási ako neoprávnená, ale ako
+        // nedostupná — nie je pokazená, len nie je prepojená.
+        let (status, receipt) = post_decision(test_state(None), &body, Some(&channel)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(receipt["reason_code"], "behavior_channel_not_configured");
+    }
+
+    #[tokio::test]
+    async fn a_foreign_household_or_another_unit_is_refused_before_execution() {
+        let channel =
+            BehaviorChannel::new("behavior-1".to_owned(), BEHAVIOR_SECRET.to_owned()).unwrap();
+        let (from, until) = open_window();
+
+        let state = behavior_state();
+        let foreign = decision_body("other-home", &from, &until, "apply");
+        let (status, receipt) = post_decision(state.clone(), &foreign, Some(&channel)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(receipt["reason_code"], "other_household");
+        assert_eq!(receipt["outcome"], "refused");
+
+        // Domácnosť môže mať viac jednotiek; rozhodnutie pre inú sem nepatrí.
+        let mut other_unit = behavior_state();
+        other_unit.central_unit_id = Some("99999999-8888-7777-6666-555555555555".to_owned());
+        let body = decision_body("pilot-home", &from, &until, "apply");
+        let (status, receipt) = post_decision(other_unit, &body, Some(&channel)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(receipt["reason_code"], "other_central_unit");
+
+        // Ani jedno neprišlo do ledgeru.
+        assert!(state
+            .ledger
+            .lock()
+            .await
+            .recent("pilot-home", 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_expired_decision_is_not_executed() {
+        let channel =
+            BehaviorChannel::new("behavior-1".to_owned(), BEHAVIOR_SECRET.to_owned()).unwrap();
+        let mut state = behavior_state();
+        // HA je nastavený, takže odmietnutie nemôže byť „chýba HA".
+        state.ha_config = Some(HaConfig {
+            websocket_url: "ws://127.0.0.1:1/api/websocket".to_owned(),
+            token: "ha-token".to_owned(),
+        });
+        state.inventory = Inventory::with(vec![living_room_light()]);
+        let now = Utc::now();
+        let body = decision_body(
+            "pilot-home",
+            &utc_z(now - chrono::Duration::hours(3)),
+            &utc_z(now - chrono::Duration::hours(2)),
+            "apply",
+        );
+        let (status, receipt) = post_decision(state.clone(), &body, Some(&channel)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(receipt["reason_code"], "decision_not_applicable");
+        assert_eq!(receipt["outcome"], "refused");
+        // Dôvod sa Behavioru povie, aby nešpekuloval.
+        assert!(receipt["detail"]
+            .as_str()
+            .unwrap()
+            .contains("window is not open"));
+        assert!(state
+            .ledger
+            .lock()
+            .await
+            .recent("pilot-home", 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_home_assistant_outage_is_recorded_and_reported_not_swallowed() {
+        let channel =
+            BehaviorChannel::new("behavior-1".to_owned(), BEHAVIOR_SECRET.to_owned()).unwrap();
+        let (from, until) = open_window();
+        let body = decision_body("pilot-home", &from, &until, "apply");
+
+        // Jednotka bez HA konfigurácie povel ani nezaloží.
+        let (status, receipt) = post_decision(behavior_state(), &body, Some(&channel)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(receipt["reason_code"], "home_assistant_not_configured");
+
+        // HA nastavený, ale zariadenie v inventári nie je — presne to, čo vidí
+        // jednotka po strate sedenia. Rozhodnutie sa zapíše a povel skončí
+        // `failed`; Behavior dostane `not_executed`, nie ticho.
+        let mut blind = behavior_state();
+        blind.ha_config = Some(HaConfig {
+            websocket_url: "ws://127.0.0.1:1/api/websocket".to_owned(),
+            token: "ha-token".to_owned(),
+        });
+        let (status, receipt) = post_decision(blind.clone(), &body, Some(&channel)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(receipt["outcome"], "not_executed");
+        assert_eq!(receipt["command"]["status"], "failed");
+        assert_eq!(receipt["command"]["reason"], "device_unavailable");
+        // Výpadok je v ledgeri, nie len v odpovedi.
+        let recorded = blind.ledger.lock().await.recent("pilot-home", 10).unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].reason.as_deref(), Some("device_unavailable"));
     }
 
     #[tokio::test]
