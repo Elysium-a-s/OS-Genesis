@@ -13,3 +13,7 @@ Sem patria potvrdené rozhodnutia architektúry, postup nasadenia, prevádzka a 
 ## Prevádzka
 
 - [ELYSIUM-348 — záloha, aktualizácia a obnova](ELYSIUM-348-obnova.md): postup pre prevádzkovateľa, čo Genesis po reštarte urobí sám, a čo nie je odmerané.
+
+## Protokoly
+
+- [ELYSIUM-349 — Matter a Thread na pilotnom hardvéri](ELYSIUM-349-matter-thread.md): rádiový hardvér Green, čo z Matteru funguje už dnes cez Home Assistant, možnosti SDK, a rozhodnutie odložiť natívnu implementáciu. Podpora nie je deklarovaná — fyzický test je rozpísaný, ale neprebehol.
