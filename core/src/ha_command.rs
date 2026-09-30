@@ -307,6 +307,17 @@ pub async fn apply_decision(
     if grant.state != GrantState::Granted {
         return Ok(grant);
     }
+    // Grant v stave `Granted` s povelom, ktorý už výsledok má, znamená, že sa
+    // unlock vykonal, ale do grantu sa to nezapísalo — napríklad keď jednotka
+    // spadla medzi vykonaním a zápisom. Druhý povel sa v takom prípade
+    // neposiela: na zámku to nie je no-op, je to druhá zmena fyzického stavu.
+    // Grant sa dorovná z toho, čo v ledgeri naozaj je.
+    if let Some(settled) = ledger
+        .get(&grant.unlock_command_id)?
+        .filter(|snapshot| snapshot.status != Status::Accepted)
+    {
+        return grant::settle_unlock(ledger, &grant.decision_id, &settled, now);
+    }
     let outcome = drive(
         config,
         inventory,
