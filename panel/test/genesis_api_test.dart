@@ -88,4 +88,30 @@ void main() {
     expect(calls[2].headers['Authorization'], 'Bearer write-secret');
     expect(jsonDecode(calls[2].body)['value'], true);
   });
+
+  test('API paths stay under the Home Assistant ingress prefix', () async {
+    final paths = <String>[];
+    final client = MockClient((request) async {
+      paths.add(request.url.path);
+      if (request.url.path.endsWith('/v1/me')) {
+        return http.Response(jsonEncode({
+          'household_id': 'pilot-home',
+          'actor_id': 'pilot-owner',
+          'role': 'owner',
+          'can_control_devices': true,
+        }), 200);
+      }
+      return http.Response('[]', 200);
+    });
+    final api = GenesisApi(
+      baseUrl: Uri.parse('https://home.example/api/hassio_ingress/pilot/'),
+      client: client,
+    );
+    await api.me('owner-secret');
+    await api.devices('owner-secret');
+    expect(paths, [
+      '/api/hassio_ingress/pilot/v1/me',
+      '/api/hassio_ingress/pilot/v1/devices',
+    ]);
+  });
 }

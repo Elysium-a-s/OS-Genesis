@@ -1,8 +1,16 @@
-use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    env,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, Request, State},
     http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    middleware::{self, Next},
+    response::{Html, Response},
     routing::get,
     Json, Router,
 };
@@ -36,6 +44,7 @@ struct Config {
     sensitive_devices: Vec<String>,
     backup_dir: Option<PathBuf>,
     panel_dir: Option<PathBuf>,
+    panel_index: Option<Arc<String>>,
 }
 
 impl Config {
@@ -67,6 +76,22 @@ impl Config {
             .is_some_and(|dir| !dir.join("index.html").is_file())
         {
             return Err("GENESIS_PANEL_DIR must contain index.html".to_owned());
+        }
+        config.panel_index = config
+            .panel_dir
+            .as_ref()
+            .map(|dir| {
+                std::fs::read_to_string(dir.join("index.html"))
+                    .map(Arc::new)
+                    .map_err(|error| format!("cannot read Genesis panel index.html: {error}"))
+            })
+            .transpose()?;
+        if config
+            .panel_index
+            .as_ref()
+            .is_some_and(|html| !html.contains("<base href=\"/\">"))
+        {
+            return Err("Genesis panel index.html must contain <base href=\"/\">".to_owned());
         }
         config.backup_dir = env::var_os("GENESIS_BACKUP_DIR")
             .filter(|value| !value.is_empty())
@@ -136,6 +161,7 @@ impl Config {
             sensitive_devices: Vec::new(),
             backup_dir: None,
             panel_dir: None,
+            panel_index: None,
         })
     }
 }
@@ -181,6 +207,7 @@ struct AppState {
     sensitive_devices: Arc<Vec<String>>,
     backup_dir: Option<Arc<PathBuf>>,
     panel_dir: Option<PathBuf>,
+    panel_index: Option<Arc<String>>,
     ledger: Arc<Mutex<Ledger>>,
     ha_config: Option<HaConfig>,
 }
@@ -197,7 +224,7 @@ struct NewCommand {
 
 fn app(state: AppState) -> Router {
     let panel_dir = state.panel_dir.clone();
-    let router = Router::new()
+    let mut router = Router::new()
         .route("/health", get(health))
         .route("/v1/me", get(me))
         .route("/v1/devices", get(devices))
@@ -217,10 +244,54 @@ fn app(state: AppState) -> Router {
         .route(
             "/v1/credentials/{credential_id}",
             axum::routing::delete(revoke_credential),
-        )
-        .with_state(state);
+        );
+    if panel_dir.is_some() {
+        router = router.route("/", get(panel_home));
+    }
+    let router = router.with_state(state);
     if let Some(dir) = panel_dir {
         router.fallback_service(ServeDir::new(dir))
+    } else {
+        router
+    }
+}
+
+async fn panel_home(State(state): State<AppState>, headers: HeaderMap) -> Html<String> {
+    let html = state
+        .panel_index
+        .as_ref()
+        .expect("panel index validated at startup");
+    let base = headers
+        .get("x-ingress-path")
+        .and_then(|value| value.to_str().ok())
+        .filter(|path| {
+            path.starts_with('/')
+                && path.len() <= 256
+                && path
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"/_-".contains(&byte))
+        })
+        .map(|path| format!("{}/", path.trim_end_matches('/')))
+        .unwrap_or_else(|| "/".to_owned());
+    Html(
+        html.replacen("<base href=\"/\">", &format!("<base href=\"{base}\">"), 1),
+    )
+}
+
+async fn ingress_guard(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if peer.ip() != IpAddr::V4(Ipv4Addr::new(172, 30, 32, 2)) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(next.run(request).await)
+}
+
+fn with_ingress_guard(router: Router, ingress_only: bool) -> Router {
+    if ingress_only {
+        router.layer(middleware::from_fn(ingress_guard))
     } else {
         router
     }
@@ -839,21 +910,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     tracing::info!(address = %listener.local_addr()?, "Genesis core listening");
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let router = app(AppState {
+        inventory,
+        read_token: config.read_token,
+        write_token: config.write_token,
+        member_token: config.member_token,
+        guest_token: config.guest_token,
+        household_id: config.household_id,
+        sensitive_devices: Arc::new(config.sensitive_devices),
+        backup_dir: config.backup_dir.map(Arc::new),
+        panel_dir: config.panel_dir,
+        panel_index: config.panel_index,
+        ledger,
+        ha_config,
+    });
+    let router = with_ingress_guard(
+        router,
+        env::var("GENESIS_INGRESS_ONLY").ok().as_deref() == Some("true"),
+    );
     axum::serve(
         listener,
-        app(AppState {
-            inventory,
-            read_token: config.read_token,
-            write_token: config.write_token,
-            member_token: config.member_token,
-            guest_token: config.guest_token,
-            household_id: config.household_id,
-            sensitive_devices: Arc::new(config.sensitive_devices),
-            backup_dir: config.backup_dir.map(Arc::new),
-            panel_dir: config.panel_dir,
-            ledger,
-            ha_config,
-        }),
+        router.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
         tokio::select! {
@@ -887,6 +964,7 @@ mod tests {
             sensitive_devices: Arc::new(Vec::new()),
             backup_dir: None,
             panel_dir: None,
+            panel_index: None,
             ledger: Arc::new(Mutex::new(Ledger::open(":memory:").unwrap())),
             ha_config: None,
         }
@@ -1590,5 +1668,42 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "ok");
         assert_eq!(json["service"], "genesis-core");
+    }
+
+    #[tokio::test]
+    async fn panel_index_uses_the_ingress_base_path() {
+        let mut state = test_state(None);
+        state.panel_index = Some(Arc::new(
+            "<base href=\"/\"><script src=\"flutter_bootstrap.js\"></script>".to_owned(),
+        ));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ingress-path", "/api/hassio_ingress/pilot".parse().unwrap());
+        let Html(html) = panel_home(State(state.clone()), headers).await;
+        assert!(html.contains("<base href=\"/api/hassio_ingress/pilot/\">"));
+
+        let mut forged = HeaderMap::new();
+        forged.insert("x-ingress-path", "/\"><script>".parse().unwrap());
+        let Html(html) = panel_home(State(state), forged).await;
+        assert!(html.contains("<base href=\"/\">"));
+    }
+
+    #[tokio::test]
+    async fn ingress_rejects_requests_outside_the_supervisor_proxy() {
+        for (peer, expected) in [
+            ("172.30.32.2:40000", StatusCode::OK),
+            ("172.30.32.3:40000", StatusCode::FORBIDDEN),
+        ] {
+            let response = with_ingress_guard(app(test_state(None)), true)
+                .oneshot(
+                    Request::builder()
+                        .uri("/health")
+                        .extension(ConnectInfo(peer.parse::<SocketAddr>().unwrap()))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
     }
 }

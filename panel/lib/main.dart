@@ -1,11 +1,18 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import 'genesis_api.dart';
 
 void main() => runApp(const GenesisApp());
+
+String genesisDefaultApiUrl() {
+  const configured = String.fromEnvironment('GENESIS_API_URL');
+  if (configured.isNotEmpty) return configured;
+  return kIsWeb ? Uri.base.resolve('.').toString() : 'http://localhost:8765';
+}
 
 class GenesisApp extends StatelessWidget {
   const GenesisApp({super.key});
@@ -34,10 +41,7 @@ class GenesisHome extends StatefulWidget {
 }
 
 class _GenesisHomeState extends State<GenesisHome> {
-  final _url = TextEditingController(text: const String.fromEnvironment(
-    'GENESIS_API_URL',
-    defaultValue: 'http://localhost:8765',
-  ));
+  final _url = TextEditingController(text: genesisDefaultApiUrl());
   final _accessToken = TextEditingController();
   GenesisPrincipal? _principal;
   final _client = http.Client();
@@ -81,7 +85,7 @@ class _GenesisHomeState extends State<GenesisHome> {
     if (mounted) setState(() => _status = ConnectionStatus.checking);
     try {
       final response = await _client
-          .get(base.resolve('/health'))
+          .get(base.resolve('health'))
           .timeout(const Duration(seconds: 4));
       if (mounted) {
         setState(() => _status = response.statusCode == 200

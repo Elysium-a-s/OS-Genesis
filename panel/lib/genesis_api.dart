@@ -80,7 +80,7 @@ class GenesisApi {
 
   Future<GenesisPrincipal> me(String accessToken) async {
     final response = await _client.get(
-      _path('/v1/me'),
+      _path('v1/me'),
       headers: {'Authorization': 'Bearer $accessToken'},
     ).timeout(const Duration(seconds: 5));
     if (response.statusCode != 200) {
@@ -93,7 +93,7 @@ class GenesisApi {
 
   Future<List<GenesisDevice>> devices(String readToken) async {
     final response = await _client.get(
-      _path('/v1/devices'),
+      _path('v1/devices'),
       headers: {'Authorization': 'Bearer $readToken'},
     ).timeout(const Duration(seconds: 5));
     if (response.statusCode != 200) {
@@ -112,7 +112,7 @@ class GenesisApi {
   }) async {
     final key = 'panel-${DateTime.now().microsecondsSinceEpoch}';
     final response = await _client.post(
-      _path('/v1/commands'),
+      _path('v1/commands'),
       headers: {
         'Authorization': 'Bearer $writeToken',
         'Content-Type': 'application/json',
