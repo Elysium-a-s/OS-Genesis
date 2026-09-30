@@ -5,6 +5,7 @@ on:
     paths:
       - 'core/**'
       - 'ha-app/**'
+      - 'panel/**'
       - 'repository.yaml'
       - '.github/workflows/ha-app.yml'
   push:
@@ -25,6 +26,18 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Build tested Flutter panel
+        working-directory: panel
+        run: |
+          flutter create --platforms=web --org com.elysium.genesis .
+          flutter pub get
+          flutter analyze
+          flutter test
+          flutter build web --release
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       - name: Read the app image and version
@@ -70,6 +83,9 @@ jobs:
             sleep 2
           done
           curl --fail --silent http://127.0.0.1:18765/health
+          curl --fail --silent http://127.0.0.1:18765/ | grep -q flutter_bootstrap.js
+          curl --fail --silent http://127.0.0.1:18765/flutter_bootstrap.js >/dev/null
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:18765/v1/missing)" = 404
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:18765/v1/devices)" = 401
           test "$(curl --silent --header 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345' http://127.0.0.1:18765/v1/devices)" = "[]"
           docker restart --time 3 "$container" >/dev/null

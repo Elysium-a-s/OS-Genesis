@@ -4,6 +4,10 @@
 
 Home Assistant app používa `homeassistant_api: true` a interný WebSocket proxy `ws://supervisor/core/websocket`. Supervisor poskytne `SUPERVISOR_TOKEN` v prostredí; štartovací skript ho odovzdá core ako `GENESIS_HA_TOKEN`. Tento token sa neukladá do Gitu ani do možností app. Používateľ nastaví samostatné `read_token` a `write_token` (každý najmenej 32 znakov). Write token povoľuje pilotné povely a nesmie byť vystavený verejnému internetu. SQLite sa ukladá do perzistentného `/data/genesis-ledger.sqlite3`. Je to celý stav Genesis; záloha, obnova a rollback sú v [docs/ELYSIUM-348-obnova.md](../docs/ELYSIUM-348-obnova.md).
 
+## Flutter panel v HA app
+
+CI pred zostavením ARM64 obrazu zostaví a otestuje Flutter web panel. Obraz obsahuje statické súbory v `/usr/share/genesis-panel`; webové UI sa otvára na `http://<IP-Green>:8765/` a používa API na tej istej adrese. Watchdog ostáva na `/health`. Zadaný prístupový token zostáva v pamäti otvoreného panelu a neposiela sa v URL. Samotný CI smoke test nie je dôkazom behu na Green ani fyzickom iPade.
+
 ## Stav distribúcie
 
 Workflow [Build Genesis HA app (ARM64)](../.github/workflows/ha-app.yml) obraz zostaví, spustí naň smoke test a uloží `genesis-ha-pilot-arm64` artifact. Pri pushi do `main` ho **publikuje do GHCR** — a publikuje presne ten obraz, ktorý smoke testom prešiel, nie druhý build.
@@ -30,7 +34,7 @@ Predpokladom je, že balík je pre Supervisor dostupný podľa jednej z dvoch ci
 
 1. V Home Assistant app obchode pridať URL repozitára `https://github.com/Elysium-a-s/OS-Genesis` (musí byť pre Supervisor dostupný).
 2. Nainštalovať **OS Genesis Pilot** a v nastaveniach vložiť dva rôzne náhodné tokeny `read_token` a `write_token`, každý s aspoň 32 znakmi.
-3. Spustiť app a otvoriť Health odkaz. V logoch skontrolovať `Home Assistant inventory loaded` po pripojení aspoň jedného svetla/zásuvky.
+3. Spustiť app a otvoriť Genesis panel z odkazu v HA. V paneli zadať serverový prístupový token a načítať inventár. V logoch skontrolovať `Home Assistant inventory loaded` po pripojení aspoň jedného svetla/zásuvky.
 4. Reštartovať HA Green a overiť automatický štart, zachovanie databázy a aktuálny inventár.
 5. Zaznamenať CPU/RAM a logy pred reštartom a po ňom; tajomstvá z logov nezdieľať.
 

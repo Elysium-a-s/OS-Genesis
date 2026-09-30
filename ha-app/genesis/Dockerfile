@@ -21,6 +21,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /source/core/target/aarch64-unknown-linux-gnu/release/genesis-core /usr/local/bin/genesis-core
+COPY panel/build/web/ /usr/share/genesis-panel/
 COPY ha-app/genesis/run.sh /run.sh
 RUN chmod 0755 /run.sh
 
