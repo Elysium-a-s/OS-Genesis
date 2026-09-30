@@ -9,3 +9,7 @@ Sem patria potvrdené rozhodnutia architektúry, postup nasadenia, prevádzka a 
 ## Bezpečnosť
 
 - [ELYSIUM-347 — párovanie, roly a správa tajomstiev](ELYSIUM-347-identita.md): čomu má návrh zabrániť, ako to rieši, a čo zostáva otvorené.
+
+## Prevádzka
+
+- [ELYSIUM-348 — záloha, aktualizácia a obnova](ELYSIUM-348-obnova.md): postup pre prevádzkovateľa, čo Genesis po reštarte urobí sám, a čo nie je odmerané.

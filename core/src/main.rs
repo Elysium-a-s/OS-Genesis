@@ -8,6 +8,7 @@ use axum::{
 };
 use chrono::Utc;
 use genesis_core::{
+    backup,
     grant::{self, AccessState},
     ha::{self, HaConfig, Inventory},
     ha_command::{self, ExecutionError},
@@ -32,6 +33,7 @@ struct Config {
     guest_token: Option<String>,
     household_id: String,
     sensitive_devices: Vec<String>,
+    backup_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -54,6 +56,9 @@ impl Config {
             .filter(|token| !token.is_empty());
         config.household_id =
             env::var("GENESIS_HOUSEHOLD_ID").unwrap_or_else(|_| "pilot-home".to_owned());
+        config.backup_dir = env::var_os("GENESIS_BACKUP_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
         config.sensitive_devices = parse_sensitive_devices(
             env::var("GENESIS_SENSITIVE_DEVICES")
                 .unwrap_or_default()
@@ -117,6 +122,7 @@ impl Config {
             guest_token: None,
             household_id: "pilot-home".to_owned(),
             sensitive_devices: Vec::new(),
+            backup_dir: None,
         })
     }
 }
@@ -160,6 +166,7 @@ struct AppState {
     guest_token: Option<String>,
     household_id: String,
     sensitive_devices: Arc<Vec<String>>,
+    backup_dir: Option<Arc<PathBuf>>,
     ledger: Arc<Mutex<Ledger>>,
     ha_config: Option<HaConfig>,
 }
@@ -191,6 +198,7 @@ fn app(state: AppState) -> Router {
         .route("/v1/pairings", axum::routing::post(create_pairing))
         .route("/v1/pairings/redeem", axum::routing::post(redeem_pairing))
         .route("/v1/credentials", get(list_credentials))
+        .route("/v1/backup", axum::routing::post(create_backup))
         .route(
             "/v1/credentials/{credential_id}",
             axum::routing::delete(revoke_credential),
@@ -461,6 +469,32 @@ async fn revoke_credential(
     }
     tracing::info!(credential_id = %credential_id, "credential revoked");
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Vypíše konzistentnú zálohu databázy.
+///
+/// Zálohu robí SQLite `VACUUM INTO`, takže je celá a platná aj keď sa práve
+/// zapisuje — na rozdiel od `cp` cez otvorený súbor. Obnova sem nepatrí: služba
+/// nedokáže bezpečne podsunúť súbor sama sebe. Postup je v `core/README.md`.
+async fn create_backup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<backup::Backup>), StatusCode> {
+    household_owner(&headers, &state).await?;
+    let directory = state
+        .backup_dir
+        .as_deref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let ledger = state.ledger.lock().await;
+    let written = backup::write(&ledger, directory, Utc::now()).map_err(|error| {
+        tracing::error!(%error, "writing the backup failed");
+        match error {
+            backup::BackupError::AlreadyExists => StatusCode::CONFLICT,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    })?;
+    tracing::info!(path = %written.path, bytes = written.bytes, "backup written");
+    Ok((StatusCode::CREATED, Json(written)))
 }
 
 /// Vlastník domácnosti. Párovanie ani odobranie prístupu nie je nič, čo by mal
@@ -759,6 +793,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "timed access resumed after a restart"
         );
     }
+    // Granty si svoje povely prevzali vyššie a spravili pri tom viac — incident
+    // a rozhodnutie o stave grantu. Toto doberie ostatné, teda panel a hlas, aby
+    // po reštarte nezostal otvorený povel, ktorý sa už nedokončí.
+    for command_id in ledger.lock().await.adopt_interrupted(
+        Actor {
+            actor_type: ActorType::Service,
+            actor_id: "genesis-core".to_owned(),
+        },
+        "interrupted_before_result",
+    )? {
+        tracing::warn!(%command_id, "command adopted as unknown after a restart");
+    }
 
     let inventory = Inventory::new();
     let ha_config = HaConfig::from_env().map_err(std::io::Error::other)?;
@@ -783,6 +829,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             guest_token: config.guest_token,
             household_id: config.household_id,
             sensitive_devices: Arc::new(config.sensitive_devices),
+            backup_dir: config.backup_dir.map(Arc::new),
             ledger,
             ha_config,
         }),
@@ -817,6 +864,7 @@ mod tests {
             guest_token: None,
             household_id: "pilot-home".to_owned(),
             sensitive_devices: Arc::new(Vec::new()),
+            backup_dir: None,
             ledger: Arc::new(Mutex::new(Ledger::open(":memory:").unwrap())),
             ha_config: None,
         }
@@ -1442,6 +1490,50 @@ mod tests {
             call(state, "DELETE", &path, Some(&owner), None).await.0,
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn a_backup_is_owner_only_and_lands_as_an_openable_database() {
+        let mut state = test_state(Some("r".repeat(32)));
+        state.write_token = Some("o".repeat(32));
+        let owner = "o".repeat(32);
+
+        assert_eq!(
+            call(state.clone(), "POST", "/v1/backup", None, None)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                state.clone(),
+                "POST",
+                "/v1/backup",
+                Some(&"r".repeat(32)),
+                None
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        // Bez nastaveného priečinka nie je kam zálohovať.
+        assert_eq!(
+            call(state.clone(), "POST", "/v1/backup", Some(&owner), None)
+                .await
+                .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        let directory =
+            std::env::temp_dir().join(format!("genesis-api-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        state.backup_dir = Some(Arc::new(directory.clone()));
+        let (status, written) = call(state, "POST", "/v1/backup", Some(&owner), None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(written["bytes"].as_u64().unwrap() > 0);
+        // Záloha nie je len súbor — je to databáza, ktorú sa dá otvoriť.
+        assert!(Ledger::open(written["path"].as_str().unwrap()).is_ok());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]
