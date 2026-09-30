@@ -6,6 +6,12 @@ import 'package:genesis_panel/main.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+/// Odpoveď tak, ako ju posiela jednotka: JSON v UTF-8 bez `charset` v hlavičke.
+/// `http.Response` so stringom by telo kódoval Latin-1 a na prvom „č" by spadol,
+/// a presne preto panel číta bajty a nie `response.body`.
+http.Response _ok(String body, [int status = 200]) =>
+    http.Response.bytes(utf8.encode(body), status);
+
 /// Odpoveď jednotky, ktorá odpovedá na `/health` a zároveň k Home Assistantovi
 /// nevidí — to je stav, v ktorom sa nesmie nič zobraziť ako úspech.
 String _diagnostics(String linkState, {String? lastError}) => jsonEncode({
@@ -34,7 +40,27 @@ Map<String, dynamic> _device({
       'availability': availability,
       'observed_at': '2026-09-30T09:05:00Z',
       'writable': true,
+      'area_id': 'ha:living_room',
+      'area_name': 'Obývačka',
     };
+
+String _inventory({
+  required bool? power,
+  required String availability,
+  required String linkState,
+}) =>
+    jsonEncode({
+      'household': {'household_id': 'pilot-home', 'name': 'Doma'},
+      'areas': [
+        {
+          'area_id': 'ha:living_room',
+          'name': 'Obývačka',
+          'device_ids': ['ha:light.living']
+        }
+      ],
+      'devices': [_device(power: power, availability: availability)],
+      'home_assistant': {'state': linkState, 'rooms_incomplete': false},
+    });
 
 const _uncertainCommand = {
   'request': {
@@ -76,10 +102,10 @@ void main() {
     final client = MockClient((request) async {
       final path = request.url.path;
       if (path.endsWith('/health')) {
-        return http.Response(jsonEncode({'status': 'ok'}), 200);
+        return _ok(jsonEncode({'status': 'ok'}), 200);
       }
       if (path.endsWith('/v1/me')) {
-        return http.Response(
+        return _ok(
             jsonEncode({
               'household_id': 'pilot-home',
               'actor_id': 'pilot-member',
@@ -88,28 +114,33 @@ void main() {
             }),
             200);
       }
-      if (path.endsWith('/v1/devices')) {
-        return http.Response(
-            jsonEncode([_device(power: false, availability: 'online')]), 200);
+      if (path.endsWith('/v1/inventory')) {
+        return _ok(
+            _inventory(
+              power: false,
+              availability: 'online',
+              linkState: 'connected',
+            ),
+            200);
       }
       if (path.endsWith('/v1/diagnostics')) {
-        return http.Response(_diagnostics('connected'), 200);
+        return _ok(_diagnostics('connected'), 200);
       }
       if (path.endsWith('/v1/commands/cmd-uncertain')) {
         detailReads += 1;
-        return http.Response(jsonEncode(_uncertainCommand), 200);
+        return _ok(jsonEncode(_uncertainCommand), 200);
       }
       if (path.endsWith('/v1/commands')) {
         if (request.method == 'POST') {
           issued += 1;
-          return http.Response(jsonEncode(_uncertainCommand), 200);
+          return _ok(jsonEncode(_uncertainCommand), 200);
         }
-        return http.Response(
+        return _ok(
           jsonEncode(issued == 0 ? const [] : const [_uncertainCommand]),
           200,
         );
       }
-      return http.Response('{}', 404);
+      return _ok('{}', 404);
     });
 
     await tester.pumpWidget(GenesisApp(client: client));
@@ -167,10 +198,10 @@ void main() {
     final client = MockClient((request) async {
       final path = request.url.path;
       if (path.endsWith('/health')) {
-        return http.Response(jsonEncode({'status': 'ok'}), 200);
+        return _ok(jsonEncode({'status': 'ok'}), 200);
       }
       if (path.endsWith('/v1/me')) {
-        return http.Response(
+        return _ok(
             jsonEncode({
               'household_id': 'pilot-home',
               'actor_id': 'pilot-member',
@@ -179,19 +210,24 @@ void main() {
             }),
             200);
       }
-      if (path.endsWith('/v1/devices')) {
+      if (path.endsWith('/v1/inventory')) {
         // Po strate sedenia jednotka prizná neznámy stav namiesto posledného.
-        return http.Response(
-            jsonEncode([_device(power: null, availability: 'unknown')]), 200);
+        return _ok(
+            _inventory(
+              power: null,
+              availability: 'unknown',
+              linkState: 'disconnected',
+            ),
+            200);
       }
       if (path.endsWith('/v1/diagnostics')) {
-        return http.Response(
+        return _ok(
             _diagnostics('disconnected', lastError: 'authentication'), 200);
       }
       if (path.endsWith('/v1/commands')) {
-        return http.Response('[]', 200);
+        return _ok('[]', 200);
       }
-      return http.Response('{}', 404);
+      return _ok('{}', 404);
     });
 
     await tester.pumpWidget(GenesisApp(client: client));

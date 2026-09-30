@@ -129,6 +129,25 @@ Token nepridávajte do príkazového riadku, histórie shellu ani logov. Endpoin
 
 Stav `sent` je iba odoslanie WebSocket správy. `provider_confirmed` vyžaduje úspešnú odpoveď `call_service`. `device_confirmed` vyžaduje čerstvú udalosť `state_changed` so zhodným HA context ID, entitou a požadovanou hodnotou. Časový limit po odoslaní je `unknown`, aj keď provider už potvrdil prijatie. Pri výpadku pred odoslaním je výsledok `failed`. Fyzické zapnutie/vypnutie, Tuya/Smart Life správanie a koreláciu konkrétnej žiarovky treba overiť na Home Assistant Green.
 
+## Inventár domácnosti
+
+`GET /v1/inventory` vracia domácnosť, jej miestnosti a jej zariadenia v jednej odpovedi, s ktorýmkoľvek platným tokenom:
+
+```json
+{
+  "household": {"household_id": "pilot-home", "name": "Doma"},
+  "areas": [{"area_id": "ha:living_room", "name": "Obývačka", "device_ids": ["ha:light.living"]}],
+  "devices": [{"device_id": "ha:light.living", "area_id": "ha:living_room", "area_name": "Obývačka"}],
+  "home_assistant": {"state": "connected", "rooms_incomplete": false}
+}
+```
+
+V jednej odpovedi preto, že miestnosti a zariadenia musia byť z toho istého okamihu; dvoma dotazmi sa dá dostať zoznam miestností a k nemu zariadenie ukazujúce do miestnosti, čo medzitým zanikla. `home_assistant.state` je tam preto, aby sa **prázdny inventár nedal prečítať ako prázdna domácnosť**: „nič nevidíme" a „nič tam nie je" vyzerajú v odpovedi inak identicky. `rooms_incomplete` znamená, že registre sa nepodarilo prečítať celé — chýbajúce miestnosti sú priznané, nie vydávané za domácnosť bez miestností.
+
+Miestnosť nemá vlastný názov v Genesise; berie sa taká, aká je nastavená v Home Assistante. Mapovanie je popísané v [adaptéri](../adapters/home-assistant/README.md). Zariadenie bez miestnosti má `area_id: null` a Genesis mu žiadnu nevyrába. Prázdna miestnosť v odpovedi zostáva — v domácnosti existuje aj vtedy, keď v nej zatiaľ nič nie je.
+
+Čítanie stačí s ktorýmkoľvek platným tokenom, rovnako ako `GET /v1/access`: rola rozhoduje o ovládaní, nie o tom, či člen domácnosti vidí, čo v nej je. Domácnosť je jedna na jednotku a token je na ňu naviazaný, takže iná domácnosť sa do odpovede dostať nemôže. `GET /v1/devices` vracia ten istý tvar zariadenia vrátane `area_id` a `area_name`, len bez miestností a domácnosti.
+
 ## Prehľad povelov
 
 `GET /v1/commands` vracia posledné povely domácnosti, najnovší prvý, s ktorýmkoľvek platným tokenom — je to čítanie. Radí sa podľa posledného zápisu do ledgeru, nie podľa času prijatia, takže vedie to, čo sa naposledy hýbalo. `limit` je voliteľný, predvolene 20 a najviac 50; vyššia hodnota sa zreže, nezamietne. Iné domácnosti sa do odpovede nedostanú.
