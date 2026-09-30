@@ -9,7 +9,10 @@ use crate::{
     behavior_decision::BehaviorDecision,
     grant::{self, Grant, GrantError, GrantState, RelockStep},
     ha::{Availability, Device, HaConfig, Inventory},
-    ledger::{Actor, ActorType, Evidence, EvidenceKind, Ledger, LedgerError, Snapshot, Status},
+    ledger::{
+        Actor, ActorType, CommandRequest, Evidence, EvidenceKind, Ledger, LedgerError, Snapshot,
+        Status,
+    },
 };
 
 type Socket =
@@ -241,6 +244,52 @@ async fn send_json(socket: &mut Socket, value: Value) -> Result<(), ()> {
         .send(Message::Text(value.to_string().into()))
         .await
         .map_err(|_| ())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExecutionError {
+    #[error("the device is not in the inventory")]
+    UnknownDevice,
+    #[error("the device cannot take a command right now")]
+    NotExecutable,
+    #[error("ledger error: {0}")]
+    Ledger(#[from] LedgerError),
+}
+
+/// Jediná cesta k vykonaniu povelu na zariadení.
+///
+/// Panel aj hlas ňou prechádzajú, takže kontrola vykonateľnosti, idempotencia,
+/// ledger a dôkazy sú pre oboch rovnaké. Aktéra určuje volajúci server, nikdy
+/// nie telo požiadavky.
+pub async fn run_power_command(
+    config: &HaConfig,
+    inventory: &Inventory,
+    ledger: &mut Ledger,
+    request: CommandRequest,
+) -> Result<Snapshot, ExecutionError> {
+    let device = inventory
+        .devices()
+        .await
+        .into_iter()
+        .find(|item| item.device_id == request.device_id)
+        .ok_or(ExecutionError::UnknownDevice)?;
+    // Neznáme zariadenie a zariadenie, ktoré povel práve nemôže prijať, sú pre
+    // volajúceho dve rôzne odpovede.
+    if !device.writable || device.availability != Availability::Online {
+        return Err(ExecutionError::NotExecutable);
+    }
+    let desired = request
+        .value
+        .as_bool()
+        .ok_or(LedgerError::Invalid("value"))?;
+    let command_id = request.command_id.clone();
+    let actor = request.actor.clone();
+    let snapshot = ledger.accept(request)?;
+    // Duplicitný zámer vráti pôvodný povel a druhýkrát sa neodosiela.
+    if snapshot.request.command_id != command_id {
+        return Ok(snapshot);
+    }
+    Ok(execute(config, &device, desired, ledger, &command_id, actor).await?)
 }
 
 /// Vykoná rozhodnutie Behavior enginu ako časovo obmedzený unlock.

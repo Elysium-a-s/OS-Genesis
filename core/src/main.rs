@@ -9,9 +9,10 @@ use axum::{
 use chrono::Utc;
 use genesis_core::{
     grant::{self, AccessState},
-    ha::{self, Availability, HaConfig, Inventory},
-    ha_command,
+    ha::{self, HaConfig, Inventory},
+    ha_command::{self, ExecutionError},
     ledger::{Actor, ActorType, CommandRequest, Ledger, LedgerError, Snapshot},
+    voice,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -142,6 +143,7 @@ fn app(state: AppState) -> Router {
         .route("/v1/commands", axum::routing::post(create_command))
         .route("/v1/commands/{command_id}", get(get_command))
         .route("/v1/access", get(access))
+        .route("/v1/voice/commands", axum::routing::post(voice_command))
         .with_state(state)
 }
 
@@ -227,58 +229,114 @@ async fn create_command(
     headers: HeaderMap,
     Json(input): Json<NewCommand>,
 ) -> Result<Json<Snapshot>, StatusCode> {
-    let caller = principal(&headers, &state)?;
-    if !caller.can_control_devices {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    if input.household_id != state.household_id {
-        return Err(StatusCode::FORBIDDEN);
+    let caller = authorized_controller(&headers, &state, &input.household_id)?;
+    let ha_config = state
+        .ha_config
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let mut ledger = state.ledger.lock().await;
+    let snapshot = ha_command::run_power_command(
+        ha_config,
+        &state.inventory,
+        &mut ledger,
+        CommandRequest {
+            household_id: input.household_id,
+            command_id: format!("cmd:{}", Uuid::new_v4()),
+            device_id: input.device_id,
+            capability_id: "power".to_owned(),
+            value: Value::Bool(input.value),
+            actor: caller,
+            idempotency_key: input.idempotency_key,
+            correlation_id: input.correlation_id,
+        },
+    )
+    .await
+    .map_err(map_execution_error)?;
+    Ok(Json(snapshot))
+}
+
+/// Maximálna dĺžka prepisu. Hlasový povel je krátky; dlhší text je chyba
+/// klienta, nie povel.
+const MAX_TRANSCRIPT: usize = 200;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpokenCommand {
+    household_id: String,
+    /// Text z rozpoznávania reči. Genesis neprijíma zvuk, takže pole pre audio
+    /// neexistuje a telo, ktoré ho nesie, sa odmietne.
+    transcript: String,
+    idempotency_key: String,
+    correlation_id: String,
+    /// Súhlas používateľa s uložením prepisu. Bez neho sa prepis neuloží.
+    #[serde(default)]
+    store_transcript: bool,
+}
+
+/// Hlasový povel pre jedno zariadenie.
+///
+/// Ide tou istou autorizáciou aj tým istým execution ledgerom ako panel; líši
+/// sa len tým, že cieľ a hodnotu treba najprv odvodiť z prepisu. Nejednoznačný
+/// povel sa nevykoná a odpoveď to priznáva stavovým kódom, nie iba telom.
+async fn voice_command(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SpokenCommand>,
+) -> Result<(StatusCode, Json<voice::Outcome>), StatusCode> {
+    let caller = authorized_controller(&headers, &state, &input.household_id)?;
+    let transcript = input.transcript.trim();
+    if transcript.is_empty() || transcript.chars().count() > MAX_TRANSCRIPT {
+        return Err(StatusCode::BAD_REQUEST);
     }
     let ha_config = state
         .ha_config
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let device = state
-        .inventory
-        .devices()
-        .await
-        .into_iter()
-        .find(|item| item.device_id == input.device_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    if device.availability != Availability::Online || !device.writable {
-        return Err(StatusCode::CONFLICT);
-    }
-    let command_id = format!("cmd:{}", Uuid::new_v4());
-    let actor = Actor {
-        actor_type: ActorType::User,
-        actor_id: caller.actor_id.to_owned(),
-    };
-    let request = CommandRequest {
-        household_id: input.household_id,
-        command_id: command_id.clone(),
-        device_id: device.device_id.clone(),
-        capability_id: "power".to_owned(),
-        value: Value::Bool(input.value),
-        actor: actor.clone(),
-        idempotency_key: input.idempotency_key,
-        correlation_id: input.correlation_id,
-    };
     let mut ledger = state.ledger.lock().await;
-    let snapshot = ledger.accept(request).map_err(map_ledger_error)?;
-    if snapshot.request.command_id != command_id {
-        return Ok(Json(snapshot));
-    }
-    let result = ha_command::execute(
+    let outcome = voice::execute(
         ha_config,
-        &device,
-        input.value,
+        &state.inventory,
         &mut ledger,
-        &command_id,
-        actor,
+        &state.household_id,
+        caller,
+        &voice::Spoken {
+            transcript: transcript.to_owned(),
+            store_transcript: input.store_transcript,
+            idempotency_key: input.idempotency_key,
+            correlation_id: input.correlation_id,
+        },
+        Utc::now(),
     )
     .await
-    .map_err(map_ledger_error)?;
-    Ok(Json(result))
+    .map_err(map_execution_error)?;
+    match &outcome {
+        voice::Outcome::Executed { .. } => Ok((StatusCode::OK, Json(outcome))),
+        // Log nesmie obsahovať to, čo bolo povedané, iba prečo sa nič nestalo.
+        voice::Outcome::Unclear(unclear) => {
+            tracing::info!(reason = unclear.reason, "voice command not executed");
+            Ok((StatusCode::UNPROCESSABLE_ENTITY, Json(outcome)))
+        }
+    }
+}
+
+/// Aktér, ktorý smie ovládať zariadenia v pilotnej domácnosti. Panel aj hlas
+/// prechádzajú touto kontrolou a identitu aktéra určuje server.
+fn authorized_controller(
+    headers: &HeaderMap,
+    state: &AppState,
+    household_id: &str,
+) -> Result<Actor, StatusCode> {
+    let caller = principal(headers, state)?;
+    if !caller.can_control_devices {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if household_id != state.household_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(Actor {
+        actor_type: ActorType::User,
+        actor_id: caller.actor_id.to_owned(),
+    })
 }
 
 async fn get_command(
@@ -296,6 +354,14 @@ async fn get_command(
         return Err(StatusCode::NOT_FOUND);
     }
     Ok(Json(snapshot))
+}
+
+fn map_execution_error(error: ExecutionError) -> StatusCode {
+    match error {
+        ExecutionError::UnknownDevice => StatusCode::NOT_FOUND,
+        ExecutionError::NotExecutable => StatusCode::CONFLICT,
+        ExecutionError::Ledger(error) => map_ledger_error(error),
+    }
 }
 
 fn map_ledger_error(error: LedgerError) -> StatusCode {
@@ -639,6 +705,107 @@ mod tests {
         assert_eq!(overview[0]["close_attempts"], 0);
         assert!(overview[0]["last_confirmed"].is_null());
         assert_eq!(overview[0]["open_incidents"], serde_json::json!([]));
+    }
+
+    fn spoken_body(household_id: &str, transcript: &str) -> String {
+        serde_json::json!({
+            "household_id": household_id,
+            "transcript": transcript,
+            "idempotency_key": "voice-1",
+            "correlation_id": "assist-1"
+        })
+        .to_string()
+    }
+
+    async fn post_voice(state: AppState, token: Option<&str>, body: String) -> StatusCode {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v1/voice/commands")
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        app(state)
+            .oneshot(request.body(Body::from(body)).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn a_voice_command_needs_a_controlling_role_and_the_pilot_household() {
+        let mut state = test_state(Some("r".repeat(32)));
+        state.write_token = Some("o".repeat(32));
+        state.member_token = Some("m".repeat(32));
+        state.guest_token = Some("g".repeat(32));
+        let body = spoken_body("pilot-home", "zapni svetlo");
+
+        assert_eq!(
+            post_voice(state.clone(), None, body.clone()).await,
+            StatusCode::UNAUTHORIZED
+        );
+        // Hlas nedáva viac práv než panel: guest ani service neovládajú zariadenia.
+        for token in ["g".repeat(32), "r".repeat(32)] {
+            assert_eq!(
+                post_voice(state.clone(), Some(&token), body.clone()).await,
+                StatusCode::FORBIDDEN
+            );
+        }
+        assert_eq!(
+            post_voice(
+                state.clone(),
+                Some(&"m".repeat(32)),
+                spoken_body("other-home", "zapni svetlo")
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        // Owner prejde autorizáciou aj kontrolou vstupu a zastaví sa až na tom,
+        // že Home Assistant nie je nakonfigurovaný.
+        assert_eq!(
+            post_voice(state, Some(&"o".repeat(32)), body).await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn a_voice_body_cannot_carry_audio_or_an_unusable_transcript() {
+        let mut state = test_state(Some("r".repeat(32)));
+        state.write_token = Some("o".repeat(32));
+        let token = "o".repeat(32);
+
+        // Genesis neprijíma zvuk, takže telo so zvukom nie je nepodstatné pole
+        // navyše, ale zamietnutá požiadavka.
+        let with_audio = serde_json::json!({
+            "household_id": "pilot-home",
+            "transcript": "zapni svetlo",
+            "idempotency_key": "voice-1",
+            "correlation_id": "assist-1",
+            "audio": "UklGRg=="
+        })
+        .to_string();
+        assert_eq!(
+            post_voice(state.clone(), Some(&token), with_audio).await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            post_voice(
+                state.clone(),
+                Some(&token),
+                spoken_body("pilot-home", "   ")
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post_voice(
+                state,
+                Some(&token),
+                spoken_body("pilot-home", &"a".repeat(MAX_TRANSCRIPT + 1))
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]
