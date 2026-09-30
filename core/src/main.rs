@@ -61,7 +61,11 @@ impl Config {
         config.panel_dir = env::var_os("GENESIS_PANEL_DIR")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
-        if config.panel_dir.as_ref().is_some_and(|dir| !dir.join("index.html").is_file()) {
+        if config
+            .panel_dir
+            .as_ref()
+            .is_some_and(|dir| !dir.join("index.html").is_file())
+        {
             return Err("GENESIS_PANEL_DIR must contain index.html".to_owned());
         }
         config.backup_dir = env::var_os("GENESIS_BACKUP_DIR")
