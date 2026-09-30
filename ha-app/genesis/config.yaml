@@ -13,8 +13,8 @@ image: ghcr.io/elysium-a-s/os-genesis-pilot
 ports:
   8080/tcp: 8765
 ports_description:
-  8080/tcp: Genesis API v domácej sieti
-webui: http://[HOST]:[PORT:8080]/health
+  8080/tcp: Genesis panel a API v domácej sieti
+webui: http://[HOST]:[PORT:8080]/
 watchdog: http://[HOST]:[PORT:8080]/health
 options:
   read_token: null
