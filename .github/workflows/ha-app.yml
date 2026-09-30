@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
   arm64-image:
@@ -26,13 +27,39 @@ jobs:
       - uses: actions/checkout@v6
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
+      - name: Read the app image and version
+        id: app
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Supervisor sťahuje `<image>:<version>` presne podľa config.yaml, takže
+          # oboje sa číta odtiaľ. Keby sa tu čokoľvek napísalo ručne, workflow a
+          # app by sa rozišli a nikto by si to nevšimol skôr než pri inštalácii.
+          config=ha-app/genesis/config.yaml
+          image="$(sed -n 's/^image:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' "$config")"
+          version="$(sed -n 's/^version:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' "$config")"
+          test -n "$image" || { echo "config.yaml neuvádza image"; exit 1; }
+          test -n "$version" || { echo "config.yaml neuvádza version"; exit 1; }
+          # Prázdna alebo pokazená hodnota by sa inak publikovala ako značka.
+          grep -Eq '^ghcr\.io/[a-z0-9._/-]+$' <<<"$image" \
+            || { echo "image musí byť malými písmenami v ghcr.io: $image"; exit 1; }
+          grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$version" \
+            || { echo "version musí byť X.Y.Z: $version"; exit 1; }
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Genesis HA app $image:$version"
       - name: Build ARM64 image
-        run: docker buildx build --platform linux/arm64 --load --tag genesis-ha-pilot:ci --file ha-app/genesis/Dockerfile .
+        run: |
+          docker buildx build --platform linux/arm64 --load \
+            --build-arg BUILD_VERSION='${{ steps.app.outputs.version }}' \
+            --tag genesis-ha-pilot:ci --file ha-app/genesis/Dockerfile .
       - name: Check image and restart
         shell: bash
         run: |
           set -euo pipefail
           test "$(docker image inspect genesis-ha-pilot:ci --format '{{.Architecture}}')" = arm64
+          # Značka a `io.hass.version` musia hovoriť to isté; Supervisor verí verzii.
+          test "$(docker image inspect genesis-ha-pilot:ci --format '{{index .Config.Labels "io.hass.version"}}')" = '${{ steps.app.outputs.version }}'
           mkdir -p "$RUNNER_TEMP/genesis-data"
           printf '%s\n' '{"read_token":"abcdefghijklmnopqrstuvwxyz012345","write_token":"ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"}' > "$RUNNER_TEMP/genesis-data/options.json"
           chmod 600 "$RUNNER_TEMP/genesis-data/options.json"
@@ -61,3 +88,38 @@ jobs:
           path: ${{ runner.temp }}/genesis-ha-pilot-arm64.tar.gz
           if-no-files-found: error
           retention-days: 14
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the tested image
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          IMAGE: ${{ steps.app.outputs.image }}
+          VERSION: ${{ steps.app.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Publikuje sa presne ten obraz, ktorý vyššie prešiel smoke testom —
+          # preto `docker tag` a nie druhý build. Znovu zostavený obraz by nebol
+          # ten istý, ktorý sme overili.
+          commit="sha-${GITHUB_SHA::7}"
+          docker tag genesis-ha-pilot:ci "$IMAGE:$commit"
+          docker push "$IMAGE:$commit"
+          echo "- nemenná značka: \`$IMAGE:$commit\`" >> "$GITHUB_STEP_SUMMARY"
+
+          # Značku verzie sa nikdy neprepisuje. Supervisor rozhoduje o aktualizácii
+          # podľa čísla verzie, takže vymeniť obsah pod tým istým číslom znamená, že
+          # prevádzkovateľ opravu nikdy nedostane — jednotka si bude myslieť, že je
+          # aktuálna. Ak verzia už existuje, treba ju v config.yaml zvýšiť.
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" >/dev/null 2>&1; then
+            echo "::warning::$IMAGE:$VERSION už v registri je; značka verzie sa neposunula. Pre vydanie zvýš version v ha-app/genesis/config.yaml."
+            echo "- značka verzie \`$VERSION\` **neposunutá** (v registri už je) — pre vydanie zvýš \`version\` v \`ha-app/genesis/config.yaml\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            docker tag genesis-ha-pilot:ci "$IMAGE:$VERSION"
+            docker push "$IMAGE:$VERSION"
+            echo "- vydaná značka: \`$IMAGE:$VERSION\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
