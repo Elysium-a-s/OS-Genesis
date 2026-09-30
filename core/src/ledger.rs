@@ -346,6 +346,30 @@ impl Ledger {
             .transpose()
     }
 
+    /// Posledné povely domácnosti, najnovší prvý.
+    ///
+    /// Snapshot je v databáze ako JSON, takže sa neradí podľa stĺpca so stavom,
+    /// ale podľa posledného zápisu do `command_events`. To je jediné poradie,
+    /// ktoré databáza naozaj vie, a zhoduje sa s tým, čo človek čaká: naposledy
+    /// sa hýbalo toto. Filtrovanie podľa stavu prebieha až u volajúceho, po
+    /// deserializácii — pri jednej pilotnej domácnosti je to lacnejšie než
+    /// ďalší stĺpec, ktorý by sa musel držať v zhode so snapshotom.
+    pub fn recent(&self, household_id: &str, limit: usize) -> Result<Vec<Snapshot>, LedgerError> {
+        let mut statement = self.connection.prepare(
+            "SELECT commands.snapshot_json
+             FROM commands
+             JOIN command_events ON command_events.command_id = commands.command_id
+             WHERE commands.household_id = ?1
+             GROUP BY commands.command_id
+             ORDER BY MAX(command_events.sequence) DESC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![household_id, limit as i64], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
     pub fn events(&self, command_id: &str) -> Result<Vec<Event>, LedgerError> {
         let mut statement = self.connection.prepare(
             "SELECT event_json FROM command_events WHERE command_id = ?1 ORDER BY sequence",

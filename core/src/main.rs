@@ -7,7 +7,7 @@ use std::{
 };
 
 use axum::{
-    extract::{ConnectInfo, Path, Request, State},
+    extract::{ConnectInfo, Path, Query, Request, State},
     http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{Html, Response},
@@ -18,7 +18,7 @@ use chrono::Utc;
 use genesis_core::{
     backup,
     grant::{self, AccessState},
-    ha::{self, HaConfig, Inventory},
+    ha::{self, HaConfig, Inventory, Link, LinkState, LinkStatus},
     ha_command::{self, ExecutionError},
     identity::{self, Role},
     ledger::{Actor, ActorType, CommandRequest, Ledger, LedgerError, Snapshot},
@@ -210,6 +210,7 @@ struct AppState {
     panel_index: Option<Arc<String>>,
     ledger: Arc<Mutex<Ledger>>,
     ha_config: Option<HaConfig>,
+    ha_link: Link,
 }
 
 #[derive(Deserialize)]
@@ -228,8 +229,9 @@ fn app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/v1/me", get(me))
         .route("/v1/devices", get(devices))
-        .route("/v1/commands", axum::routing::post(create_command))
+        .route("/v1/commands", get(list_commands).post(create_command))
         .route("/v1/commands/{command_id}", get(get_command))
+        .route("/v1/diagnostics", get(diagnostics))
         .route("/v1/access", get(access))
         .route("/v1/voice/commands", axum::routing::post(voice_command))
         .route(
@@ -811,6 +813,78 @@ async fn get_command(
     Ok(Json(snapshot))
 }
 
+/// Koľko povelov vydá prehľad naraz.
+///
+/// Snapshot sa deserializuje po jednom, takže strop je tu preto, aby odpoveď
+/// nerástla s databázou — pilotná domácnosť ich za týždeň nazbiera viac, než sa
+/// dá zmysluplne prečítať na jednej obrazovke.
+const COMMAND_PAGE_DEFAULT: usize = 20;
+const COMMAND_PAGE_LIMIT: usize = 50;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandPage {
+    limit: Option<usize>,
+}
+
+/// Posledné povely domácnosti, najnovší prvý.
+///
+/// Bez tohto sa dá zistiť len stav povelu, ktorého identifikátor už niekto má.
+/// Po obnovení panela alebo po reštarte jednotky ten identifikátor nikto nemá,
+/// takže neistý povel by zostal ležať bez toho, aby o ňom niekto vedel.
+async fn list_commands(
+    State(state): State<AppState>,
+    Query(page): Query<CommandPage>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Snapshot>>, StatusCode> {
+    principal(&headers, &state).await?;
+    let limit = page
+        .limit
+        .unwrap_or(COMMAND_PAGE_DEFAULT)
+        .clamp(1, COMMAND_PAGE_LIMIT);
+    let ledger = state.ledger.lock().await;
+    let commands = ledger
+        .recent(&state.household_id, limit)
+        .map_err(map_ledger_error)?;
+    Ok(Json(commands))
+}
+
+#[derive(Serialize)]
+struct Diagnostics {
+    unit: UnitDiagnostics,
+    home_assistant: LinkStatus,
+}
+
+#[derive(Serialize)]
+struct UnitDiagnostics {
+    version: &'static str,
+    household_id: String,
+    /// Či je prepojenie na Home Assistant vôbec nastavené. Jednotka bez neho
+    /// nie je pokazená, len nespojená, a panel to má povedať inak.
+    home_assistant_configured: bool,
+}
+
+/// Diagnostika je zámerne niečo iné než `/health`.
+///
+/// `/health` odpovedá na jednu otázku — či beží HTTP server — a musí zostať bez
+/// tokenu, pretože ho volá watchdog Supervisora. Stav prepojenia na Home
+/// Assistant sa z neho prečítať nedá a ani nemá: je to údaj o domácnosti, a
+/// keby ho `/health` niesol, čítal by ho každý, kto sa dostane na port.
+async fn diagnostics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Diagnostics>, StatusCode> {
+    principal(&headers, &state).await?;
+    Ok(Json(Diagnostics {
+        unit: UnitDiagnostics {
+            version: env!("CARGO_PKG_VERSION"),
+            household_id: state.household_id.clone(),
+            home_assistant_configured: state.ha_config.is_some(),
+        },
+        home_assistant: state.ha_link.status().await,
+    }))
+}
+
 fn map_execution_error(error: ExecutionError) -> StatusCode {
     match error {
         ExecutionError::UnknownDevice => StatusCode::NOT_FOUND,
@@ -897,8 +971,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let inventory = Inventory::new();
     let ha_config = HaConfig::from_env().map_err(std::io::Error::other)?;
+    // Nenastavené prepojenie je iný stav než spadnuté. Jednotka bez HA tokenu
+    // nie je pokazená a diagnostika to nesmie hlásiť ako poruchu.
+    let ha_link = Link::new(if ha_config.is_some() {
+        LinkState::Connecting
+    } else {
+        LinkState::NotConfigured
+    });
     if let Some(ha_config) = ha_config.clone() {
-        tokio::spawn(ha::run(ha_config.clone(), inventory.clone()));
+        tokio::spawn(ha::run(
+            ha_config.clone(),
+            inventory.clone(),
+            ha_link.clone(),
+        ));
         tokio::spawn(reconcile_sweeper(
             ha_config,
             inventory.clone(),
@@ -921,6 +1006,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         panel_index: config.panel_index,
         ledger,
         ha_config,
+        ha_link,
     });
     let router = with_ingress_guard(
         router,
@@ -965,6 +1051,7 @@ mod tests {
             panel_index: None,
             ledger: Arc::new(Mutex::new(Ledger::open(":memory:").unwrap())),
             ha_config: None,
+            ha_link: Link::default(),
         }
     }
 
@@ -1647,6 +1734,131 @@ mod tests {
                 StatusCode::SERVICE_UNAVAILABLE
             );
         }
+    }
+
+    /// Povel v ledgeri pre testy prehľadu. Pomenované polia zostávajú v teste,
+    /// aby bolo vidieť, že prehľad nemieša domácnosti.
+    async fn seed_command(state: &AppState, household_id: &str, command_id: &str, device_id: &str) {
+        state
+            .ledger
+            .lock()
+            .await
+            .accept(CommandRequest {
+                household_id: household_id.to_owned(),
+                command_id: command_id.to_owned(),
+                device_id: device_id.to_owned(),
+                capability_id: "power".to_owned(),
+                value: Value::Bool(true),
+                actor: Actor {
+                    actor_type: ActorType::User,
+                    actor_id: "pilot-member".to_owned(),
+                },
+                idempotency_key: format!("key-{command_id}"),
+                correlation_id: format!("corr-{command_id}"),
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_command_overview_is_scoped_newest_first_and_admits_an_uncertain_result() {
+        let token = "c".repeat(32);
+        let state = test_state(Some(token.clone()));
+        seed_command(&state, "pilot-home", "cmd-one", "ha:light.hall").await;
+        seed_command(&state, "pilot-home", "cmd-two", "ha:light.living").await;
+        // Iná domácnosť je v tej istej databáze a do prehľadu sa dostať nesmie.
+        seed_command(&state, "other-home", "cmd-three", "ha:light.attic").await;
+        // Prvý povel sa prizná ako neistý. Prijatý bol ako prvý, ale hýbal sa
+        // naposledy, a prehľad má viesť to, čo sa hýbalo naposledy.
+        state
+            .ledger
+            .lock()
+            .await
+            .transition(
+                "cmd-one",
+                genesis_core::ledger::Status::Unknown,
+                Actor {
+                    actor_type: ActorType::Service,
+                    actor_id: "genesis-core".to_owned(),
+                },
+                None,
+                Some("no_result".to_owned()),
+            )
+            .unwrap();
+
+        let (status, body) = call(state.clone(), "GET", "/v1/commands", Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let commands = body.as_array().unwrap();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0]["request"]["command_id"], "cmd-one");
+        assert_eq!(commands[0]["status"], "unknown");
+        assert_eq!(commands[0]["reason"], "no_result");
+        assert_eq!(commands[0]["request"]["correlation_id"], "corr-cmd-one");
+        assert_eq!(commands[1]["request"]["command_id"], "cmd-two");
+
+        // Prehľad je za tokenom ako všetko ostatné o domácnosti.
+        let (unauthorized, _) = call(state.clone(), "GET", "/v1/commands", None, None).await;
+        assert_eq!(unauthorized, StatusCode::UNAUTHORIZED);
+        // Strop drží aj vtedy, keď si ho volajúci nastaví sám.
+        let (capped, body) =
+            call(state, "GET", "/v1/commands?limit=5000", Some(&token), None).await;
+        assert_eq!(capped, StatusCode::OK);
+        assert_eq!(body.as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_healthy_unit_does_not_claim_home_assistant_is_connected() {
+        let token = "d".repeat(32);
+        let state = test_state(Some(token.clone()));
+        // `/health` je zelené a nemá o Home Assistantovi čo povedať; presne
+        // preto stav prepojenia nesmie visieť na ňom.
+        let health = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+        let bytes = to_bytes(health.into_body(), 1024).await.unwrap();
+        let health: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(health["status"], "ok");
+        assert!(health.get("home_assistant").is_none());
+
+        let (unauthorized, _) = call(state.clone(), "GET", "/v1/diagnostics", None, None).await;
+        assert_eq!(unauthorized, StatusCode::UNAUTHORIZED);
+
+        let (status, body) = call(state, "GET", "/v1/diagnostics", Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        // Jednotka bez HA konfigurácie nie je pokazená, je nespojená — a hlási
+        // to inak než spadnuté sedenie.
+        assert_eq!(body["unit"]["home_assistant_configured"], false);
+        assert_eq!(body["home_assistant"]["state"], "not_configured");
+        assert_eq!(body["home_assistant"]["last_error"], Value::Null);
+        assert_eq!(body["home_assistant"]["last_inventory_at"], Value::Null);
+        assert_eq!(body["unit"]["household_id"], "pilot-home");
+    }
+
+    #[tokio::test]
+    async fn diagnostics_reports_a_dropped_link_while_the_unit_still_answers() {
+        let token = "e".repeat(32);
+        let mut state = test_state(Some(token.clone()));
+        state.ha_config = Some(HaConfig {
+            websocket_url: "ws://supervisor/core/websocket".to_owned(),
+            token: "supervisor-token".to_owned(),
+        });
+        state.ha_link = Link::new(LinkState::Disconnected);
+
+        let (status, body) = call(state, "GET", "/v1/diagnostics", Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["unit"]["home_assistant_configured"], true);
+        assert_eq!(body["home_assistant"]["state"], "disconnected");
+        assert_eq!(body["home_assistant"]["last_inventory_devices"], 0);
+        // Diagnostika nesmie vydať ani adresu, ani token prepojenia.
+        let serialized = body.to_string();
+        assert!(!serialized.contains("supervisor-token"));
+        assert!(!serialized.contains("ws://"));
     }
 
     #[tokio::test]

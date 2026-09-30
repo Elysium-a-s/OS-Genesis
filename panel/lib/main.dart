@@ -16,7 +16,12 @@ String genesisDefaultApiUrl() {
 }
 
 class GenesisApp extends StatelessWidget {
-  const GenesisApp({super.key});
+  const GenesisApp({super.key, this.client});
+
+  /// Vymeniteľný HTTP klient. Prezentácia neistého výsledku a výpadku Home
+  /// Assistanta sa inak nedá otestovať bez skutočnej jednotky, a práve tie dve
+  /// veci sa nesmú zobraziť ako úspech.
+  final http.Client? client;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -27,14 +32,16 @@ class GenesisApp extends StatelessWidget {
         theme: elysiumTheme(Brightness.light),
         darkTheme: elysiumTheme(Brightness.dark),
         themeMode: ThemeMode.system,
-        home: const GenesisHome(),
+        home: GenesisHome(client: client),
       );
 }
 
 enum ConnectionStatus { checking, online, offline }
 
 class GenesisHome extends StatefulWidget {
-  const GenesisHome({super.key});
+  const GenesisHome({super.key, this.client});
+
+  final http.Client? client;
 
   @override
   State<GenesisHome> createState() => _GenesisHomeState();
@@ -44,16 +51,22 @@ class _GenesisHomeState extends State<GenesisHome> {
   final _url = TextEditingController(text: genesisDefaultApiUrl());
   final _accessToken = TextEditingController();
   GenesisPrincipal? _principal;
-  final _client = http.Client();
+  late final http.Client _client = widget.client ?? http.Client();
+  late final bool _ownsClient = widget.client == null;
   Timer? _timer;
   ConnectionStatus _status = ConnectionStatus.checking;
   String _household = 'Pilotná domácnosť';
   String _room = 'Obývačka';
   List<GenesisDevice> _devices = [];
   String? _inventoryError;
-  GenesisCommandResult? _lastCommand;
+  GenesisCommand? _lastCommand;
   String? _commandMessage;
   String? _pendingDeviceId;
+  bool _readingCommand = false;
+  List<GenesisCommand> _commands = [];
+  String? _ledgerError;
+  GenesisDiagnostics? _diagnostics;
+  String? _diagnosticsError;
   static const _rooms = ['Obývačka', 'Spálňa', 'Kuchyňa'];
 
   @override
@@ -123,12 +136,106 @@ class _GenesisHomeState extends State<GenesisHome> {
         });
       }
     }
+    await _refreshOverview();
+  }
+
+  /// Diagnostika a ledger. Obe sa načítajú aj vtedy, keď inventár zlyhal —
+  /// práve vtedy sú najviac na niečo, pretože povedia, či jednotka nevidí k
+  /// Home Assistantovi alebo či zlyhalo niečo iné.
+  Future<void> _refreshOverview() async {
+    final base = _baseUrl();
+    if (base == null || _accessToken.text.isEmpty) return;
+    final api = GenesisApi(baseUrl: base, client: _client);
+    try {
+      final diagnostics = await api.diagnostics(_accessToken.text);
+      if (mounted) {
+        setState(() {
+          _diagnostics = diagnostics;
+          _diagnosticsError = null;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _diagnostics = null;
+          _diagnosticsError =
+              'Diagnostika nie je dostupná, takže stav prepojenia na Home Assistant nie je známy.';
+        });
+      }
+    }
+    try {
+      final commands = await api.commands(_accessToken.text);
+      if (mounted) {
+        setState(() {
+          _commands = commands;
+          _ledgerError = null;
+        });
+      }
+    } catch (_) {
+      // Prázdny zoznam by tvrdil, že povely nie sú. Nevieme to — vieme len, že
+      // sa nedali prečítať.
+      if (mounted) {
+        setState(() {
+          _commands = [];
+          _ledgerError = 'Ledger sa nepodarilo prečítať. Posledné povely nie sú známe.';
+        });
+      }
+    }
+  }
+
+  /// Znovu prečíta stav povelu. Je to čítanie z ledgeru, nie druhé odoslanie —
+  /// pri neistom výsledku je to jediná akcia, ktorá sa smie ponúknuť.
+  Future<void> _readCommandAgain() async {
+    final base = _baseUrl();
+    final command = _lastCommand;
+    if (base == null || command == null || _accessToken.text.isEmpty) return;
+    setState(() => _readingCommand = true);
+    try {
+      final api = GenesisApi(baseUrl: base, client: _client);
+      final fresh = await api.command(_accessToken.text, command.commandId);
+      if (mounted) {
+        setState(() {
+          _lastCommand = fresh;
+          _commandMessage = null;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _commandMessage =
+            'Stav povelu sa nepodarilo prečítať. Výsledok zostáva taký, aký je uvedený.');
+      }
+    } finally {
+      if (mounted) setState(() => _readingCommand = false);
+    }
+    await _refreshDevices();
+  }
+
+  /// Neistý povel na tomto zariadení, ak je posledný povel práve taký.
+  ///
+  /// Kým tam je, prepínač sa neponúka. Slepé zopakovanie je presne to, čo sa pri
+  /// neznámom výsledku nesmie stať: nikto nevie, či prvý povel prešiel, takže
+  /// druhý môže zariadenie prepnúť naopak.
+  GenesisCommand? _uncertainCommandFor(String deviceId) {
+    final last = _lastCommand;
+    for (final command in [if (last != null) last, ..._commands]) {
+      if (command.deviceId == deviceId) {
+        return command.isUncertain ? command : null;
+      }
+    }
+    return null;
   }
 
   Future<void> _setPower(GenesisDevice device) async {
     final base = _baseUrl();
     if (base == null || _principal?.canControlDevices != true || device.power == null) {
       setState(() => _commandMessage = 'Táto rola nemôže ovládať zariadenie.');
+      return;
+    }
+    final uncertain = _uncertainCommandFor(device.id);
+    if (uncertain != null) {
+      setState(() => _commandMessage =
+          'Posledný povel na toto zariadenie skončil neisto (referencia ${uncertain.correlationId}). '
+          'Zopakovanie sa neponúka, kým sa stav nevyjasní — najprv obnovte stav.');
       return;
     }
     setState(() {
@@ -161,7 +268,7 @@ class _GenesisHomeState extends State<GenesisHome> {
   @override
   void dispose() {
     _timer?.cancel();
-    _client.close();
+    if (_ownsClient) _client.close();
     _url.dispose();
     _accessToken.dispose();
     super.dispose();
@@ -253,6 +360,10 @@ class _GenesisHomeState extends State<GenesisHome> {
                   _hero(),
                   const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
                   _devicesSection(),
+                  const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
+                  _diagnosticsSection(),
+                  const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
+                  _ledgerSection(),
                   const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
                   _connectionSection(),
                 ],
@@ -363,6 +474,181 @@ class _GenesisHomeState extends State<GenesisHome> {
     );
   }
 
+  /// Stav jednotky a stav prepojenia na Home Assistant, oddelene.
+  ///
+  /// `/health` odpovedá na jednu otázku — či beží HTTP server jednotky — a
+  /// odpovedá na ňu zeleno aj vtedy, keď WebSocket sedenie k Home Assistantovi
+  /// spadlo. Keby panel ukazoval len ju, kontrolka by svietila nad inventárom,
+  /// ktorý sa už nehýbe.
+  Widget _diagnosticsSection() {
+    final theme = Theme.of(context);
+    final colors = ElysiumColors.of(context);
+    final link = _diagnostics?.homeAssistant;
+    final (linkLabel, linkColor) = _linkPresentation(link);
+    final (healthLabel, healthColor) = _healthPresentation();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const ElysiumSectionLabel('Diagnostika'),
+        const SizedBox(height: 10),
+        Text(
+          'Odpovedajúca jednotka a dostupný Home Assistant sú dve rôzne veci. '
+          'Zelená jednotka neznamená, že sa inventár hýbe.',
+          style: theme.textTheme.bodyMedium,
+        ),
+        const SizedBox(height: 14),
+        ElysiumCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _diagnosticsRow(
+                'Genesis jednotka',
+                'Odpoveď na /health',
+                healthLabel,
+                healthColor,
+              ),
+              const SizedBox(height: 14),
+              _diagnosticsRow(
+                'Home Assistant',
+                'WebSocket sedenie a inventár',
+                linkLabel,
+                linkColor,
+              ),
+              if (_diagnosticsError != null) ...[
+                const SizedBox(height: 14),
+                Text(_diagnosticsError!, style: theme.textTheme.bodySmall),
+              ],
+              if (link != null) ...[
+                const SizedBox(height: 14),
+                Divider(color: colors.border, height: 1),
+                const SizedBox(height: 14),
+                for (final line in _linkDetails(link, _diagnostics!))
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text(line, style: theme.textTheme.labelMedium),
+                  ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _diagnosticsRow(
+    String title,
+    String detail,
+    String label,
+    Color color,
+  ) {
+    final theme = Theme.of(context);
+    return Row(
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: theme.textTheme.titleMedium),
+              const SizedBox(height: 4),
+              Text(detail, style: theme.textTheme.labelMedium),
+            ],
+          ),
+        ),
+        const SizedBox(width: 12),
+        ElysiumStatusPill(label: label, color: color),
+      ],
+    );
+  }
+
+  /// Posledné povely z ledgeru.
+  ///
+  /// Detail jedného povelu sa dá prečítať len vtedy, keď niekto jeho
+  /// identifikátor má. Po obnovení stránky ho nemá nikto, takže bez tohto
+  /// zoznamu by neistý povel zostal ležať bez toho, aby sa o ňom niekto dozvedel.
+  Widget _ledgerSection() {
+    final theme = Theme.of(context);
+    final uncertain = _commands.where((command) => command.isUncertain).length;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const ElysiumSectionLabel('Ledger'),
+        const SizedBox(height: 10),
+        Text(
+          'Posledné povely domácnosti, najnovší prvý. Ledger je záznam, nie ovládanie — '
+          'povel sa z tohto zoznamu nedá zopakovať.',
+          style: theme.textTheme.bodyMedium,
+        ),
+        const SizedBox(height: 14),
+        if (_ledgerError != null)
+          ElysiumCard(
+            accent: ElysiumColors.caution,
+            child: Text(_ledgerError!, style: theme.textTheme.bodyLarge),
+          )
+        else if (_commands.isEmpty)
+          ElysiumCard(
+            child: Text(
+              'Zatiaľ nie sú načítané žiadne povely.',
+              style: theme.textTheme.bodyMedium,
+            ),
+          )
+        else ...[
+          if (uncertain > 0)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: ElysiumCard(
+                accent: ElysiumColors.caution,
+                child: Text(
+                  uncertain == 1
+                      ? 'Jeden z posledných povelov skončil neisto.'
+                      : 'Neisto skončilo $uncertain z posledných povelov.',
+                  style: theme.textTheme.bodyLarge,
+                ),
+              ),
+            ),
+          for (final command in _commands) ...[
+            _ledgerRow(command),
+            const SizedBox(height: 10),
+          ],
+        ],
+      ],
+    );
+  }
+
+  Widget _ledgerRow(GenesisCommand command) {
+    final theme = Theme.of(context);
+    final (label, _, color, icon) = _commandPresentation(command);
+    return ElysiumCard(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: color, size: 18),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(command.deviceId, style: theme.textTheme.bodyLarge),
+                const SizedBox(height: 6),
+                Text(
+                  command.statusChangedAt == null
+                      ? label
+                      : '$label · ${_formatMoment(command.statusChangedAt!.toLocal())}',
+                  style: theme.textTheme.labelMedium,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Referencia ${command.correlationId}',
+                  style: theme.textTheme.labelMedium,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _connectionSection() {
     final theme = Theme.of(context);
     return Column(
@@ -419,6 +705,7 @@ class _GenesisHomeState extends State<GenesisHome> {
     final colors = ElysiumColors.of(context);
     final stale = device.isStale;
     final on = device.power == true;
+    final uncertain = _uncertainCommandFor(device.id);
     final state = stale
         ? 'Stav zastaraný alebo neznámy'
         : on
@@ -432,102 +719,242 @@ class _GenesisHomeState extends State<GenesisHome> {
     final disabled = stale ||
         !device.writable ||
         _principal?.canControlDevices != true ||
-        _pendingDeviceId != null;
+        _pendingDeviceId != null ||
+        uncertain != null;
     return ElysiumCard(
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Container(
-            width: ElysiumLayout.minimumTapTarget,
-            height: ElysiumLayout.minimumTapTarget,
-            decoration: BoxDecoration(
-              color: on && !stale ? colors.goldWash(38) : colors.surfaceElevated,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              on && !stale ? Icons.lightbulb : Icons.lightbulb_outline,
-              color: on && !stale ? colors.gold : colors.textTertiary,
-            ),
+          Row(
+            children: [
+              Container(
+                width: ElysiumLayout.minimumTapTarget,
+                height: ElysiumLayout.minimumTapTarget,
+                decoration: BoxDecoration(
+                  color: on && !stale ? colors.goldWash(38) : colors.surfaceElevated,
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  on && !stale ? Icons.lightbulb : Icons.lightbulb_outline,
+                  color: on && !stale ? colors.gold : colors.textTertiary,
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(device.name, style: theme.textTheme.titleMedium),
+                    const SizedBox(height: 8),
+                    ElysiumStatusPill(label: state, color: stateColor),
+                    if (device.observedAt != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        'Posledná zmena v HA: ${_formatMoment(device.observedAt!.toLocal())}',
+                        style: theme.textTheme.labelMedium,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Switch(
+                value: device.power ?? false,
+                onChanged: disabled ? null : (_) => _setPower(device),
+              ),
+            ],
           ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(device.name, style: theme.textTheme.titleMedium),
-                const SizedBox(height: 8),
-                ElysiumStatusPill(label: state, color: stateColor),
-                if (device.observedAt != null) ...[
-                  const SizedBox(height: 8),
-                  Text(
-                    'Posledná zmena v HA: ${_formatMoment(device.observedAt!.toLocal())}',
-                    style: theme.textTheme.labelMedium,
-                  ),
-                ],
-              ],
+          if (uncertain != null) ...[
+            const SizedBox(height: 14),
+            Text(
+              'Posledný povel na toto zariadenie skončil neisto, takže prepínač je zamknutý. '
+              'Referencia ${uncertain.correlationId}.',
+              style: theme.textTheme.bodySmall,
             ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// Ako sa jeden stav povelu hovorí nahlas.
+  ///
+  /// Šesť stavov ledgeru sa rozlišuje po jednom a stav, ktorý panel nepozná, sa
+  /// nikdy nezobrazí ako úspech — keby jednotka niekedy vydala siedmy, mlčky
+  /// prijatý „prijaté" by bola nepravda o niečom, čo sa už mohlo stať.
+  (String, String, Color, IconData) _commandPresentation(GenesisCommand command) {
+    final colors = ElysiumColors.of(context);
+    return switch (command.status) {
+      'accepted' => (
+          'Prijaté',
+          'Genesis povel zapísal a ešte ho neodoslal.',
+          colors.gold,
+          Icons.schedule_outlined,
+        ),
+      'sent' => (
+          'Odoslané',
+          'Povel je u Home Assistanta; potvrdenie ešte neprišlo.',
+          colors.gold,
+          Icons.send_outlined,
+        ),
+      'provider_confirmed' => (
+          'Prijal Home Assistant',
+          'Home Assistant povel potvrdil. O samotnom zariadení to nehovorí nič.',
+          ElysiumColors.caution,
+          Icons.cloud_done_outlined,
+        ),
+      'device_confirmed' => (
+          'Potvrdilo zariadenie',
+          'Zariadenie zmenu ohlásilo.',
+          ElysiumColors.teal,
+          Icons.check_circle_outline,
+        ),
+      'unknown' => (
+          'Neistý výsledok',
+          'Nikto nevie, či sa zmena stala. Zopakovanie sa preto neponúka.',
+          ElysiumColors.caution,
+          Icons.help_outline,
+        ),
+      'failed' => (
+          'Zlyhalo',
+          'Povel sa nevykonal.',
+          ElysiumColors.danger,
+          Icons.error_outline,
+        ),
+      _ => (
+          'Stav, ktorý panel nepozná',
+          'Tento stav panel nevie vyhodnotiť, takže ho nepočíta za úspech.',
+          ElysiumColors.caution,
+          Icons.help_outline,
+        ),
+    };
+  }
+
+  Widget _commandCard(GenesisCommand command) {
+    final theme = Theme.of(context);
+    final (label, detail, accent, icon) = _commandPresentation(command);
+    return ElysiumCard(
+      accent: accent,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(icon, color: accent),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(label, style: theme.textTheme.titleMedium),
+                    const SizedBox(height: 4),
+                    Text(detail, style: theme.textTheme.bodyLarge),
+                  ],
+                ),
+              ),
+            ],
           ),
-          const SizedBox(width: 12),
-          Switch(
-            value: device.power ?? false,
-            onChanged: disabled ? null : (_) => _setPower(device),
+          const SizedBox(height: 14),
+          for (final line in _commandDetails(command))
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text(line, style: theme.textTheme.labelMedium),
+            ),
+          const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
+              onPressed: _readingCommand ? null : _readCommandAgain,
+              icon: const Icon(Icons.sync, size: 18),
+              label: const Text('Obnoviť stav'),
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _commandCard(GenesisCommandResult result) {
-    final theme = Theme.of(context);
-    final colors = ElysiumColors.of(context);
-    final (text, accent, icon) = switch (result.status) {
-      'device_confirmed' => (
-          'Zariadenie potvrdilo zmenu',
-          ElysiumColors.teal,
-          Icons.check_circle_outline,
-        ),
-      'provider_confirmed' => (
-          'Home Assistant prijal povel; zariadenie nepotvrdené',
-          ElysiumColors.caution,
-          Icons.cloud_done_outlined,
-        ),
-      'unknown' => (
-          'Výsledok je neistý',
-          ElysiumColors.caution,
-          Icons.help_outline,
-        ),
-      'failed' => ('Povel zlyhal', ElysiumColors.danger, Icons.error_outline),
-      'sent' => (
-          'Povel odoslaný; čaká sa na potvrdenie',
-          colors.gold,
-          Icons.send_outlined,
-        ),
-      _ => (
-          'Povel prijatý; čaká sa na odoslanie',
-          colors.gold,
-          Icons.schedule_outlined,
-        ),
-    };
-    return ElysiumCard(
-      accent: accent,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, color: accent),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(text, style: theme.textTheme.bodyLarge),
-                const SizedBox(height: 4),
-                Text(result.commandId, style: theme.textTheme.labelMedium),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
+  /// Čo presne je o povele známe: čas, dôkaz, dôvod a referencia.
+  List<String> _commandDetails(GenesisCommand command) {
+    final lines = <String>[];
+    if (command.statusChangedAt != null) {
+      lines.add('Stav sa zmenil ${_formatMoment(command.statusChangedAt!.toLocal())}');
+    }
+    final evidence = command.evidence;
+    if (evidence != null) {
+      final what = switch (evidence.kind) {
+        'provider_ack' => 'Potvrdenie Home Assistanta',
+        'device_observation' => 'Pozorovanie na zariadení',
+        _ => 'Dôkaz',
+      };
+      final at = evidence.at == null
+          ? ''
+          : ', ${_formatMoment(evidence.at!.toLocal())}';
+      lines.add('$what: ${evidence.reference}$at');
+    } else if (command.providerAcknowledged) {
+      // Prechod na neistý stav dôkaz zo snapshotu zmaže, ale úroveň potvrdenia
+      // zostáva. Bez tejto vety by neistý povel vyzeral, že sa nestalo nič.
+      lines.add('V tomto stave bez dôkazu; Home Assistant prijatie potvrdil predtým.');
+    } else {
+      lines.add('Bez dôkazu.');
+    }
+    if (command.reason != null) lines.add('Dôvod: ${command.reason}');
+    lines.add('Zariadenie ${command.deviceId}');
+    lines.add('Referencia pre nahlásenie: ${command.correlationId}');
+    lines.add('Povel ${command.commandId}');
+    return lines;
   }
+
+  (String, Color) _healthPresentation() => switch (_status) {
+        ConnectionStatus.checking => ('Overujem', ElysiumColors.caution),
+        ConnectionStatus.online => ('Odpovedá', ElysiumColors.teal),
+        ConnectionStatus.offline => ('Neodpovedá', ElysiumColors.danger),
+      };
+
+  (String, Color) _linkPresentation(GenesisHaLink? link) {
+    if (link == null) return ('Neznámy', ElysiumColors.caution);
+    return switch (link.state) {
+      'connected' => ('Spojené', ElysiumColors.teal),
+      'connecting' => ('Spája sa', ElysiumColors.caution),
+      'disconnected' => ('Spojenie spadlo', ElysiumColors.danger),
+      'not_configured' => ('Nenastavené', ElysiumColors.caution),
+      _ => ('Neznámy', ElysiumColors.caution),
+    };
+  }
+
+  List<String> _linkDetails(GenesisHaLink link, GenesisDiagnostics diagnostics) {
+    final lines = <String>[];
+    if (link.since != null) {
+      lines.add('V tomto stave od ${_formatMoment(link.since!.toLocal())}');
+    }
+    if (link.lastInventoryAt != null) {
+      lines.add(
+        'Inventár naposledy načítaný ${_formatMoment(link.lastInventoryAt!.toLocal())}, '
+        'zariadení: ${link.lastInventoryDevices}',
+      );
+    } else {
+      lines.add('Inventár sa v tomto behu ešte nenačítal.');
+    }
+    if (link.isUnconfigured) {
+      lines.add('Prepojenie na Home Assistant nie je nastavené. Nie je to porucha.');
+    }
+    if (link.lastError != null) {
+      lines.add('Naposledy skončilo: ${_linkErrorText(link.lastError!)}');
+    }
+    lines.add('Verzia jednotky ${diagnostics.version}');
+    return lines;
+  }
+
+  /// Kategória ukončenia sedenia po slovensky. Jednotka vydáva len kategóriu —
+  /// ani adresu, ani token — a panel na tom nič nedopĺňa.
+  String _linkErrorText(String category) => switch (category) {
+        'connection' => 'sedenie sa nepodarilo otvoriť',
+        'authentication' => 'Home Assistant token neprijal',
+        'protocol' => 'odpoveď nebola tá, ktorú Genesis čaká',
+        'disconnected' => 'sedenie spadlo',
+        _ => category,
+      };
 
   Widget _navigation(bool wide) {
     final theme = Theme.of(context);

@@ -89,6 +89,119 @@ void main() {
     expect(jsonDecode(calls[2].body)['value'], true);
   });
 
+  test('a command snapshot carries its evidence, time and reference', () async {
+    final client = MockClient((request) async => http.Response(
+          jsonEncode({
+            'request': {
+              'command_id': 'cmd-1',
+              'device_id': 'ha:light.living',
+              'correlation_id': 'panel-42',
+            },
+            'status': 'device_confirmed',
+            'confirmation_level': 'device',
+            'status_changed_at': '2026-09-30T09:06:00Z',
+            'reason': null,
+            'evidence': {
+              'kind': 'device_observation',
+              'reference': 'light.living=on',
+              'at': '2026-09-30T09:06:00Z',
+            },
+          }),
+          200,
+        ));
+    final api = GenesisApi(
+      baseUrl: Uri.parse('http://green.local:8765'),
+      client: client,
+    );
+    final command = await api.command('read-secret', 'cmd-1');
+    expect(command.status, 'device_confirmed');
+    expect(command.correlationId, 'panel-42');
+    expect(command.statusChangedAt, DateTime.utc(2026, 9, 30, 9, 6));
+    expect(command.evidence!.kind, 'device_observation');
+    expect(command.evidence!.reference, 'light.living=on');
+    expect(command.isSettled, true);
+    expect(command.isUncertain, false);
+  });
+
+  test('an uncertain command keeps what the provider confirmed and is not settled',
+      () async {
+    final command = GenesisCommand.fromJson({
+      'request': {'command_id': 'cmd-2', 'correlation_id': 'panel-7'},
+      'status': 'unknown',
+      // Prechod na neistý stav dôkaz zo snapshotu zmaže, úroveň potvrdenia nie.
+      'confirmation_level': 'provider',
+      'status_changed_at': '2026-09-30T09:07:00Z',
+      'reason': 'no_device_confirmation',
+      'evidence': null,
+    });
+    expect(command.isUncertain, true);
+    expect(command.isInFlight, false);
+    expect(command.isSettled, false);
+    expect(command.providerAcknowledged, true);
+    expect(command.evidence, isNull);
+
+    // Stav, ktorý panel nepozná, sa nesmie vyhodnotiť ako dokončený ani ako
+    // prebiehajúci — inak by budúci siedmy stav prešiel ako úspech.
+    final unfamiliar = GenesisCommand.fromJson({
+      'request': {'command_id': 'cmd-3', 'correlation_id': 'panel-8'},
+      'status': 'superseded',
+      'confirmation_level': 'none',
+      'status_changed_at': '2026-09-30T09:08:00Z',
+      'reason': null,
+      'evidence': null,
+    });
+    expect(unfamiliar.isSettled, false);
+    expect(unfamiliar.isInFlight, false);
+    expect(unfamiliar.isUncertain, false);
+  });
+
+  test('diagnostics separates the unit from the Home Assistant link', () async {
+    final paths = <String>[];
+    final client = MockClient((request) async {
+      paths.add(request.url.path);
+      return http.Response(
+          jsonEncode({
+            'unit': {
+              'version': '0.1.0',
+              'household_id': 'pilot-home',
+              'home_assistant_configured': true,
+            },
+            'home_assistant': {
+              'state': 'disconnected',
+              'since': '2026-09-30T09:00:00Z',
+              'last_inventory_at': '2026-09-30T08:55:00Z',
+              'last_inventory_devices': 3,
+              'last_error': 'authentication',
+            },
+          }),
+          200);
+    });
+    final api = GenesisApi(
+      baseUrl: Uri.parse('http://green.local:8765'),
+      client: client,
+    );
+    final diagnostics = await api.diagnostics('read-secret');
+    expect(paths.single, '/v1/diagnostics');
+    expect(diagnostics.homeAssistantConfigured, true);
+    expect(diagnostics.homeAssistant.isConnected, false);
+    expect(diagnostics.homeAssistant.isUnconfigured, false);
+    expect(diagnostics.homeAssistant.lastInventoryDevices, 3);
+    expect(diagnostics.homeAssistant.lastError, 'authentication');
+  });
+
+  test('an unconfigured link is a state of its own, not a failure', () {
+    final link = GenesisHaLink.fromJson({
+      'state': 'not_configured',
+      'since': '2026-09-30T09:00:00Z',
+      'last_inventory_at': null,
+      'last_inventory_devices': 0,
+      'last_error': null,
+    });
+    expect(link.isUnconfigured, true);
+    expect(link.isConnected, false);
+    expect(link.lastError, isNull);
+  });
+
   test('API paths stay under the Home Assistant ingress prefix', () async {
     final paths = <String>[];
     final client = MockClient((request) async {
