@@ -129,6 +129,33 @@ Token nepridávajte do príkazového riadku, histórie shellu ani logov. Endpoin
 
 Stav `sent` je iba odoslanie WebSocket správy. `provider_confirmed` vyžaduje úspešnú odpoveď `call_service`. `device_confirmed` vyžaduje čerstvú udalosť `state_changed` so zhodným HA context ID, entitou a požadovanou hodnotou. Časový limit po odoslaní je `unknown`, aj keď provider už potvrdil prijatie. Pri výpadku pred odoslaním je výsledok `failed`. Fyzické zapnutie/vypnutie, Tuya/Smart Life správanie a koreláciu konkrétnej žiarovky treba overiť na Home Assistant Green.
 
+## Prehľad povelov
+
+`GET /v1/commands` vracia posledné povely domácnosti, najnovší prvý, s ktorýmkoľvek platným tokenom — je to čítanie. Radí sa podľa posledného zápisu do ledgeru, nie podľa času prijatia, takže vedie to, čo sa naposledy hýbalo. `limit` je voliteľný, predvolene 20 a najviac 50; vyššia hodnota sa zreže, nezamietne. Iné domácnosti sa do odpovede nedostanú.
+
+Bez tohto sa dá prečítať iba povel, ktorého `command_id` už niekto má. Po obnovení panelu ani po reštarte jednotky ho nemá nikto, takže neistý povel by zostal ležať bez toho, aby sa o ňom niekto dozvedel.
+
+## Diagnostika
+
+`GET /v1/diagnostics` s ktorýmkoľvek platným tokenom vracia stav jednotky a **oddelene** stav prepojenia na Home Assistant:
+
+```json
+{
+  "unit": {"version": "0.1.0", "household_id": "pilot-home", "home_assistant_configured": true},
+  "home_assistant": {
+    "state": "disconnected",
+    "since": "2026-09-30T09:00:00+00:00",
+    "last_inventory_at": "2026-09-30T08:55:00+00:00",
+    "last_inventory_devices": 3,
+    "last_error": "authentication"
+  }
+}
+```
+
+`state` je `not_configured`, `connecting`, `connected` alebo `disconnected`. `connected` znamená načítaný celý inventár, nie otvorený socket. `since` sa pri opakovaných pokusoch nehýbe, takže sa z neho dá prečítať dĺžka výpadku. `last_error` je iba kategória (`connection`, `authentication`, `protocol`, `disconnected`) — adresa ani token sa do diagnostiky nedostanú.
+
+Je to zámerne iný endpoint než `/health`. `/health` odpovedá na jednu otázku — či beží HTTP server — a musí zostať bez tokenu, pretože ho volá watchdog Supervisora. Stav prepojenia na Home Assistant je údaj o domácnosti, takže si žiada prístup; keby ho niesol `/health`, čítal by ho každý, kto sa dostane na port. A hlavne: zdravá jednotka nie je dôkaz dostupného Home Assistanta, takže jedna zelená kontrolka pre oboje by svietila nad inventárom, ktorý sa už nehýbe.
+
 ## Hlasový povel
 
 `POST /v1/voice/commands` vezme prepis reči a vykoná ho tou istou cestou ako panel. Rozpoznávanie reči patrí hlasovému rozhraniu — v pilote Home Assistant Assist — a **Genesis neprijíma zvuk**: telo požiadavky má iba text, neznáme polia sa zamietajú, takže požiadavku so zvukom nie je možné ani poslať. STT/TTS adaptér je samostatná úloha epicu.

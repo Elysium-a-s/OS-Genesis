@@ -1,7 +1,8 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -97,6 +98,95 @@ pub struct Device {
     pub availability: Availability,
 }
 
+/// Stav prepojenia Genesis↔Home Assistant.
+///
+/// Je to zámerne niečo iné než `/health`. Core môže odpovedať a byť úplne
+/// zdravý aj vtedy, keď k Home Assistantovi nevidí — WebSocket sedenie beží
+/// vedľa HTTP servera a spadne samo. Kto tie dve veci zlúči do jednej
+/// kontrolky, dostane zelenú nad mŕtvym inventárom, a to je presne ten druh
+/// falošného úspechu, ktorý sa nesmie zobraziť.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkState {
+    /// Prepojenie nie je nastavené — jednotka nemá URL ani token. Nie je to
+    /// porucha a nesmie sa tak javiť.
+    NotConfigured,
+    /// Sedenie sa otvára a inventár ešte neprišiel.
+    Connecting,
+    /// Sedenie je otvorené a inventár sa načítal.
+    Connected,
+    /// Sedenie spadlo alebo sa nepodarilo otvoriť.
+    Disconnected,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct LinkStatus {
+    pub state: LinkState,
+    /// Odkedy je prepojenie v tomto stave, RFC 3339. Pri výpadku sa nehýbe s
+    /// každým opakovaným pokusom, takže sa z neho dá prečítať, ako dlho je to
+    /// dole.
+    pub since: String,
+    /// Kedy sa naposledy načítal celý inventár.
+    pub last_inventory_at: Option<String>,
+    /// Koľko zariadení vtedy prišlo.
+    pub last_inventory_devices: usize,
+    /// Kategória posledného ukončenia sedenia. Kategória, nie správa: do
+    /// diagnostiky nesmie presiaknuť token ani adresa.
+    pub last_error: Option<&'static str>,
+}
+
+#[derive(Clone)]
+pub struct Link(Arc<RwLock<LinkStatus>>);
+
+impl Link {
+    pub fn new(state: LinkState) -> Self {
+        Self(Arc::new(RwLock::new(LinkStatus {
+            state,
+            since: Utc::now().to_rfc3339(),
+            last_inventory_at: None,
+            last_inventory_devices: 0,
+            last_error: None,
+        })))
+    }
+
+    pub async fn status(&self) -> LinkStatus {
+        self.0.read().await.clone()
+    }
+
+    /// Prepojenie prešlo do stavu. `since` sa mení len pri skutočnej zmene
+    /// stavu — opakované pokusy každé tri sekundy by inak každý výpadok robili
+    /// večne čerstvým a nikto by z toho nevyčítal, ako dlho trvá.
+    async fn entered(&self, state: LinkState, last_error: Option<&'static str>) {
+        let mut status = self.0.write().await;
+        if status.state != state {
+            status.state = state;
+            status.since = Utc::now().to_rfc3339();
+        }
+        if last_error.is_some() {
+            status.last_error = last_error;
+        }
+    }
+
+    /// Inventár prišiel celý. Až toto je dôkaz, že na druhej strane je Home
+    /// Assistant, ktorý odpovedá — nie otvorený socket.
+    async fn inventory_loaded(&self, devices: usize) {
+        let at = Utc::now().to_rfc3339();
+        let mut status = self.0.write().await;
+        if status.state != LinkState::Connected {
+            status.state = LinkState::Connected;
+            status.since = at.clone();
+        }
+        status.last_inventory_at = Some(at);
+        status.last_inventory_devices = devices;
+    }
+}
+
+impl Default for Link {
+    fn default() -> Self {
+        Self::new(LinkState::NotConfigured)
+    }
+}
+
 #[derive(Clone)]
 pub struct HaConfig {
     pub websocket_url: String,
@@ -133,13 +223,35 @@ enum HaError {
     Disconnected,
 }
 
+impl HaError {
+    /// Kategória pre log a diagnostiku. Zámerne bez detailu: ani adresa, ani
+    /// token, ani telo odpovede sa odtiaľto nedostanú ďalej.
+    fn category(&self) -> &'static str {
+        match self {
+            HaError::Connection => "connection",
+            HaError::Authentication => "authentication",
+            HaError::Protocol => "protocol",
+            HaError::Disconnected => "disconnected",
+        }
+    }
+}
+
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-pub async fn run(config: HaConfig, inventory: Inventory) {
+pub async fn run(config: HaConfig, inventory: Inventory, link: Link) {
     loop {
-        let result = run_session(&config, &inventory).await;
+        let result = run_session(&config, &inventory, &link).await;
+        // Po strate sedenia sa inventár prizná ako neznámy a prepojenie ako
+        // spadnuté. Poradie je dôležité: keby sa najprv ohlásilo spadnuté
+        // prepojenie, ostal by okamih, v ktorom panel čítal starý stav
+        // zariadení ako platný.
         inventory.mark_unknown().await;
+        link.entered(
+            LinkState::Disconnected,
+            result.as_ref().err().map(HaError::category),
+        )
+        .await;
         if let Err(error) = result {
             tracing::warn!(category = %error, "Home Assistant connection ended");
         }
@@ -147,7 +259,7 @@ pub async fn run(config: HaConfig, inventory: Inventory) {
     }
 }
 
-async fn run_session(config: &HaConfig, inventory: &Inventory) -> Result<(), HaError> {
+async fn run_session(config: &HaConfig, inventory: &Inventory, link: &Link) -> Result<(), HaError> {
     let (mut socket, _) = connect_async(&config.websocket_url)
         .await
         .map_err(|_| HaError::Connection)?;
@@ -193,6 +305,7 @@ async fn run_session(config: &HaConfig, inventory: &Inventory) -> Result<(), HaE
                 inventory.apply_event(event).await;
             }
             let count = inventory.devices().await.len();
+            link.inventory_loaded(count).await;
             tracing::info!(count, "Home Assistant inventory loaded");
             break;
         } else {
@@ -316,17 +429,68 @@ mod tests {
             }
         });
         let inventory = Inventory::new();
+        let link = Link::new(LinkState::Connecting);
         let config = HaConfig {
             websocket_url: format!("ws://{address}/api/websocket"),
             token: "test-secret".to_owned(),
         };
-        run_session(&config, &inventory).await.unwrap_err();
+        run_session(&config, &inventory, &link).await.unwrap_err();
         assert_eq!(inventory.devices().await[0].power, Some(true));
+        // Prepojenie sa hlási ako spojené až po načítanom inventári, a vie
+        // povedať, koľko zariadení vtedy prišlo.
+        let loaded = link.status().await;
+        assert_eq!(loaded.state, LinkState::Connected);
+        assert_eq!(loaded.last_inventory_devices, 1);
+        assert!(loaded.last_inventory_at.is_some());
         inventory.mark_unknown().await;
         assert_eq!(inventory.devices().await[0].power, None);
-        run_session(&config, &inventory).await.unwrap_err();
+        run_session(&config, &inventory, &link).await.unwrap_err();
         assert_eq!(inventory.devices().await[0].power, Some(true));
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_dropped_link_keeps_since_across_retries_and_records_only_a_category() {
+        let link = Link::new(LinkState::Connecting);
+        link.entered(
+            LinkState::Disconnected,
+            Some(HaError::Authentication.category()),
+        )
+        .await;
+        let first = link.status().await;
+        assert_eq!(first.state, LinkState::Disconnected);
+        assert_eq!(first.last_error, Some("authentication"));
+        // Druhý neúspešný pokus o to isté nesmie `since` posunúť, inak by sa z
+        // dĺžky výpadku nedalo nič prečítať.
+        link.entered(
+            LinkState::Disconnected,
+            Some(HaError::Connection.category()),
+        )
+        .await;
+        let second = link.status().await;
+        assert_eq!(second.since, first.since);
+        assert_eq!(second.last_error, Some("connection"));
+        // Kategória je celá pravda, ktorú diagnostika o chybe vydá — žiadna
+        // adresa, žiadny token.
+        for category in [
+            HaError::Connection.category(),
+            HaError::Authentication.category(),
+            HaError::Protocol.category(),
+            HaError::Disconnected.category(),
+        ] {
+            assert!(category
+                .chars()
+                .all(|character| character.is_ascii_lowercase()));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_link_is_not_a_failure() {
+        let link = Link::default();
+        let status = link.status().await;
+        assert_eq!(status.state, LinkState::NotConfigured);
+        assert_eq!(status.last_error, None);
+        assert_eq!(status.last_inventory_at, None);
     }
 
     async fn send_server(
