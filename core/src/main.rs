@@ -21,6 +21,7 @@ use serde_json::Value;
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
+use tower_http::services::ServeDir;
 use uuid::Uuid;
 
 struct Config {
@@ -34,6 +35,7 @@ struct Config {
     household_id: String,
     sensitive_devices: Vec<String>,
     backup_dir: Option<PathBuf>,
+    panel_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -56,6 +58,12 @@ impl Config {
             .filter(|token| !token.is_empty());
         config.household_id =
             env::var("GENESIS_HOUSEHOLD_ID").unwrap_or_else(|_| "pilot-home".to_owned());
+        config.panel_dir = env::var_os("GENESIS_PANEL_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        if config.panel_dir.as_ref().is_some_and(|dir| !dir.join("index.html").is_file()) {
+            return Err("GENESIS_PANEL_DIR must contain index.html".to_owned());
+        }
         config.backup_dir = env::var_os("GENESIS_BACKUP_DIR")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
@@ -123,6 +131,7 @@ impl Config {
             household_id: "pilot-home".to_owned(),
             sensitive_devices: Vec::new(),
             backup_dir: None,
+            panel_dir: None,
         })
     }
 }
@@ -167,6 +176,7 @@ struct AppState {
     household_id: String,
     sensitive_devices: Arc<Vec<String>>,
     backup_dir: Option<Arc<PathBuf>>,
+    panel_dir: Option<PathBuf>,
     ledger: Arc<Mutex<Ledger>>,
     ha_config: Option<HaConfig>,
 }
@@ -182,7 +192,8 @@ struct NewCommand {
 }
 
 fn app(state: AppState) -> Router {
-    Router::new()
+    let panel_dir = state.panel_dir.clone();
+    let router = Router::new()
         .route("/health", get(health))
         .route("/v1/me", get(me))
         .route("/v1/devices", get(devices))
@@ -203,7 +214,12 @@ fn app(state: AppState) -> Router {
             "/v1/credentials/{credential_id}",
             axum::routing::delete(revoke_credential),
         )
-        .with_state(state)
+        .with_state(state);
+    if let Some(dir) = panel_dir {
+        router.fallback_service(ServeDir::new(dir))
+    } else {
+        router
+    }
 }
 
 async fn devices(
@@ -830,6 +846,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             household_id: config.household_id,
             sensitive_devices: Arc::new(config.sensitive_devices),
             backup_dir: config.backup_dir.map(Arc::new),
+            panel_dir: config.panel_dir,
             ledger,
             ha_config,
         }),
@@ -865,6 +882,7 @@ mod tests {
             household_id: "pilot-home".to_owned(),
             sensitive_devices: Arc::new(Vec::new()),
             backup_dir: None,
+            panel_dir: None,
             ledger: Arc::new(Mutex::new(Ledger::open(":memory:").unwrap())),
             ha_config: None,
         }
