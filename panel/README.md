@@ -1,6 +1,14 @@
 # Genesis panel
 
-Jeden Flutter/Dart projekt pre iPadOS a web. Panel má responzívnu navigáciu domácnosť/miestnosť, kontrolu `GET /health`, inventár z `GET /v1/devices` a pilotný povel cez `POST /v1/commands`. Pilotné miestnosti sú ukážkové; zariadenia sa zatiaľ zobrazujú za celú domácnosť.
+Jeden Flutter/Dart projekt pre iPadOS a web. Panel má responzívnu navigáciu domácnosť/miestnosť, kontrolu `GET /health`, inventár z `GET /v1/inventory` a pilotný povel cez `POST /v1/commands`.
+
+## Miestnosti sú skutočné
+
+Domácnosť, miestnosti aj priradenie zariadení prichádzajú z `GET /v1/inventory`, teda z Home Assistanta. V paneli nie je napísaná žiadna miestnosť. Názov domácnosti je `location_name` z Home Assistanta; kým ho jednotka nenačíta, panel píše iba „Domácnosť" a nič konkrétne netvrdí.
+
+Výber sa viaže na `area_id`, ktoré sa pri premenovaní miestnosti nemení. Keď vybraná miestnosť zanikne, panel sa vráti na celú domácnosť — držať výber na neexistujúcej miestnosti by znamenalo ukazovať prázdno a tvrdiť, že miestnosť existuje. Zariadenia bez priradenia majú vlastnú skupinu **Bez miestnosti**; panel pre ne miestnosť nevyrába.
+
+Prázdny zoznam má tri rôzne príčiny a panel ich nezlieva: ešte sa nepozeral, pozrel sa a domácnosť je naozaj prázdna, alebo sa pozrieť nedá. Posledné dve vyzerajú v odpovedi rovnako, preto inventár nesie so sebou stav prepojenia. Keď sa register miestností nepodarilo prečítať celý (vyžaduje administrátorský token Home Assistanta), panel to napíše a zariadenia ukáže všetky.
 
 ## Stav povelu, ledger a diagnostika
 
@@ -23,6 +31,8 @@ flutter run -d chrome --dart-define=GENESIS_API_URL=http://localhost:8765
 flutter build web --release
 flutter build ios --simulator --no-codesign
 ```
+
+Odpovede sa dekódujú výslovne ako UTF-8 z `bodyBytes`, nie cez `response.body`: axum posiela `application/json` bez parametra `charset` a `package:http` bez neho padá na Latin-1, čo by zo slovenských názvov miestností a zariadení urobilo nečitateľnú zmes.
 
 Webový panel v Home Assistant app verzie `0.1.2` sa otvára cez HA Ingress a automaticky použije rovnakú adresu pre API. Na iPade ako samostatnej natívnej aplikácii treba adresu Genesis API určiť podľa plánovaného spôsobu bezpečného prístupu; port 8765 sa v HA app už nepublikuje. Stav **Online** znamená úspešné volanie health endpointu, nepotvrdzuje HA inventár ani fyzické zariadenia. Prístupový token sa drží iba v pamäti otvoreného panelu a zobrazuje sa ako heslo. Panel nevydáva `provider_confirmed` za zmenu fyzického zariadenia; neistý výsledok označí `unknown`. Prepínač sa deaktivuje pri nedostupnom HA spojení, neznámom stave a tiež vtedy, keď posledný povel na tom zariadení skončil neisto. HA `last_updated` je čas poslednej zmeny zariadenia, nie lehota platnosti stavu; panel ho zobrazuje iba ako informáciu. Povel naslepo znova neodosielajte — panel to pri neistom výsledku ani neponúkne a namiesto toho ponúka prečítanie stavu z ledgeru.
 

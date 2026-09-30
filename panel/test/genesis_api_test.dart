@@ -5,6 +5,12 @@ import 'package:genesis_panel/genesis_api.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+/// Odpoveď tak, ako ju posiela jednotka: JSON v UTF-8 bez `charset` v hlavičke.
+/// `http.Response` so stringom by telo kódoval Latin-1 a na prvom „č" by spadol,
+/// a presne preto panel číta bajty a nie `response.body`.
+http.Response _ok(String body, [int status = 200]) =>
+    http.Response.bytes(utf8.encode(body), status);
+
 void main() {
   test('availability distinguishes current and unknown HA state', () {
     final now = DateTime.utc(2026, 9, 29, 12);
@@ -42,26 +48,39 @@ void main() {
     final client = MockClient((request) async {
       calls.add(request);
       if (request.url.path == '/v1/me') {
-        return http.Response(jsonEncode({
+        return _ok(jsonEncode({
           'household_id': 'pilot-home',
           'actor_id': 'pilot-member',
           'role': 'member',
           'can_control_devices': true,
         }), 200);
       }
-      if (request.url.path == '/v1/devices') {
-        return http.Response(jsonEncode([
-          {
-            'device_id': 'ha:light.living',
-            'name': 'Living',
-            'power': false,
-            'availability': 'online',
-            'observed_at': '2026-09-29T12:00:00Z',
-            'writable': true
-          }
-        ]), 200);
+      if (request.url.path == '/v1/inventory') {
+        return _ok(jsonEncode({
+          'household': {'household_id': 'pilot-home', 'name': 'Doma'},
+          'areas': [
+            {
+              'area_id': 'ha:living_room',
+              'name': 'Obývačka',
+              'device_ids': ['ha:light.living']
+            }
+          ],
+          'devices': [
+            {
+              'device_id': 'ha:light.living',
+              'name': 'Living',
+              'power': false,
+              'availability': 'online',
+              'observed_at': '2026-09-29T12:00:00Z',
+              'writable': true,
+              'area_id': 'ha:living_room',
+              'area_name': 'Obývačka'
+            }
+          ],
+          'home_assistant': {'state': 'connected', 'rooms_incomplete': false}
+        }), 200);
       }
-      return http.Response(jsonEncode({
+      return _ok(jsonEncode({
         'request': {'command_id': 'cmd-1'},
         'status': 'provider_confirmed',
         'reason': null
@@ -74,12 +93,16 @@ void main() {
     final me = await api.me('member-secret');
     expect(me.role, 'member');
     expect(me.canControlDevices, true);
-    final devices = await api.devices('read-secret');
-    expect(devices.single.id, 'ha:light.living');
+    final inventory = await api.inventory('read-secret');
+    expect(inventory.householdName, 'Doma');
+    expect(inventory.devices.single.id, 'ha:light.living');
+    expect(inventory.devices.single.areaName, 'Obývačka');
+    expect(inventory.areas.single.deviceIds, ['ha:light.living']);
+    expect(inventory.isConnected, true);
     final result = await api.setPower(
       writeToken: 'write-secret',
       householdId: 'pilot-home',
-      deviceId: devices.single.id,
+      deviceId: inventory.devices.single.id,
       value: true,
     );
     expect(result.status, 'provider_confirmed');
@@ -90,7 +113,7 @@ void main() {
   });
 
   test('a command snapshot carries its evidence, time and reference', () async {
-    final client = MockClient((request) async => http.Response(
+    final client = MockClient((request) async => _ok(
           jsonEncode({
             'request': {
               'command_id': 'cmd-1',
@@ -159,7 +182,7 @@ void main() {
     final paths = <String>[];
     final client = MockClient((request) async {
       paths.add(request.url.path);
-      return http.Response(
+      return _ok(
           jsonEncode({
             'unit': {
               'version': '0.1.0',
@@ -207,24 +230,78 @@ void main() {
     final client = MockClient((request) async {
       paths.add(request.url.path);
       if (request.url.path.endsWith('/v1/me')) {
-        return http.Response(jsonEncode({
+        return _ok(jsonEncode({
           'household_id': 'pilot-home',
           'actor_id': 'pilot-owner',
           'role': 'owner',
           'can_control_devices': true,
         }), 200);
       }
-      return http.Response('[]', 200);
+      return _ok(
+          jsonEncode({
+            'household': {'household_id': 'pilot-home', 'name': null},
+            'areas': [],
+            'devices': [],
+            'home_assistant': {'state': 'connecting', 'rooms_incomplete': false}
+          }),
+          200);
     });
     final api = GenesisApi(
       baseUrl: Uri.parse('https://home.example/api/hassio_ingress/pilot/'),
       client: client,
     );
     await api.me('owner-secret');
-    await api.devices('owner-secret');
+    await api.inventory('owner-secret');
     expect(paths, [
       '/api/hassio_ingress/pilot/v1/me',
-      '/api/hassio_ingress/pilot/v1/devices',
+      '/api/hassio_ingress/pilot/v1/inventory',
     ]);
+  });
+
+  test('an empty inventory says whether anyone could look', () {
+    final unreachable = GenesisInventory.fromJson({
+      'household': {'household_id': 'pilot-home', 'name': null},
+      'areas': [],
+      'devices': [],
+      'home_assistant': {'state': 'disconnected', 'rooms_incomplete': false},
+    });
+    expect(unreachable.isConnected, false);
+    expect(unreachable.devices, isEmpty);
+    // Prázdno bez názvu domácnosti si panel nesmie domyslieť.
+    expect(unreachable.householdName, isNull);
+
+    final reallyEmpty = GenesisInventory.fromJson({
+      'household': {'household_id': 'pilot-home', 'name': 'Doma'},
+      'areas': [],
+      'devices': [],
+      'home_assistant': {'state': 'connected', 'rooms_incomplete': false},
+    });
+    expect(reallyEmpty.isConnected, true);
+    expect(reallyEmpty.devices, isEmpty);
+  });
+
+  test('a device without a room is not put into an invented one', () {
+    final inventory = GenesisInventory.fromJson({
+      'household': {'household_id': 'pilot-home', 'name': 'Doma'},
+      'areas': [
+        {'area_id': 'ha:living_room', 'name': 'Obývačka', 'device_ids': []}
+      ],
+      'devices': [
+        {
+          'device_id': 'ha:switch.plug',
+          'name': 'Zásuvka',
+          'power': true,
+          'availability': 'online',
+          'writable': true,
+          'area_id': null,
+          'area_name': null
+        }
+      ],
+      'home_assistant': {'state': 'connected', 'rooms_incomplete': true},
+    });
+    expect(inventory.devicesWithoutArea.single.id, 'ha:switch.plug');
+    expect(inventory.areas.single.deviceIds, isEmpty);
+    // Chýbajúce miestnosti sú priznané, nie vydávané za prázdnu domácnosť.
+    expect(inventory.roomsIncomplete, true);
   });
 }

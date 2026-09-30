@@ -38,6 +38,12 @@ class GenesisApp extends StatelessWidget {
 
 enum ConnectionStatus { checking, online, offline }
 
+/// Čo je v paneli vybrané.
+///
+/// „Bez miestnosti" nie je miestnosť a nemá identifikátor, takže sa nedá vyjadriť
+/// len ako `areaId`; preto rozsah a identifikátor idú zvlášť.
+enum AreaScope { whole, area, withoutArea }
+
 class GenesisHome extends StatefulWidget {
   const GenesisHome({super.key, this.client});
 
@@ -55,9 +61,9 @@ class _GenesisHomeState extends State<GenesisHome> {
   late final bool _ownsClient = widget.client == null;
   Timer? _timer;
   ConnectionStatus _status = ConnectionStatus.checking;
-  String _household = 'Pilotná domácnosť';
-  String _room = 'Obývačka';
-  List<GenesisDevice> _devices = [];
+  GenesisInventory? _inventory;
+  AreaScope _scope = AreaScope.whole;
+  String? _areaId;
   String? _inventoryError;
   GenesisCommand? _lastCommand;
   String? _commandMessage;
@@ -67,7 +73,6 @@ class _GenesisHomeState extends State<GenesisHome> {
   String? _ledgerError;
   GenesisDiagnostics? _diagnostics;
   String? _diagnosticsError;
-  static const _rooms = ['Obývačka', 'Spálňa', 'Kuchyňa'];
 
   @override
   void initState() {
@@ -119,25 +124,74 @@ class _GenesisHomeState extends State<GenesisHome> {
     try {
       final api = GenesisApi(baseUrl: base, client: _client);
       final principal = await api.me(_accessToken.text);
-      final devices = await api.devices(_accessToken.text);
+      final inventory = await api.inventory(_accessToken.text);
       if (mounted) {
         setState(() {
           _principal = principal;
-          _devices = devices;
+          _inventory = inventory;
           _inventoryError = null;
+          _keepSelectionValid(inventory);
         });
       }
     } catch (_) {
       if (mounted) {
         setState(() {
           _principal = null;
-          _devices = [];
+          _inventory = null;
           _inventoryError = 'Inventár nie je dostupný. Skontrolujte spojenie a prístup.';
         });
       }
     }
     await _refreshOverview();
   }
+
+  /// Vybraná miestnosť mohla medzitým zaniknúť — niekto ju v Home Assistante
+  /// zmazal alebo z nej vzal posledné zariadenie. Držať výber na nej by
+  /// znamenalo ukazovať prázdno a tvrdiť, že miestnosť existuje.
+  void _keepSelectionValid(GenesisInventory inventory) {
+    if (_scope != AreaScope.area) return;
+    final stillThere = inventory.areas.any((area) => area.areaId == _areaId);
+    if (!stillThere) {
+      _scope = AreaScope.whole;
+      _areaId = null;
+    }
+  }
+
+  /// Zariadenia podľa vybraného rozsahu.
+  List<GenesisDevice> get _visibleDevices {
+    final devices = _inventory?.devices ?? const <GenesisDevice>[];
+    return switch (_scope) {
+      AreaScope.whole => devices,
+      AreaScope.area =>
+        devices.where((device) => device.areaId == _areaId).toList(),
+      AreaScope.withoutArea =>
+        devices.where((device) => device.areaId == null).toList(),
+    };
+  }
+
+  /// Názov domácnosti. Pred pripojením netvrdí nič konkrétne; potom je to názov
+  /// z Home Assistanta, a keď ho jednotka nemá, aspoň identifikátor domácnosti.
+  String get _householdLabel {
+    final inventory = _inventory;
+    if (inventory == null) return 'Domácnosť';
+    return inventory.householdName ?? inventory.householdId;
+  }
+
+  String get _scopeLabel => switch (_scope) {
+        AreaScope.whole => 'Celá domácnosť',
+        AreaScope.withoutArea => 'Bez miestnosti',
+        AreaScope.area => _inventory?.areas
+                .firstWhere(
+                  (area) => area.areaId == _areaId,
+                  orElse: () => const GenesisArea(
+                    areaId: '',
+                    name: 'Celá domácnosť',
+                    deviceIds: [],
+                  ),
+                )
+                .name ??
+            'Celá domácnosť',
+      };
 
   /// Diagnostika a ledger. Obe sa načítajú aj vtedy, keď inventár zlyhal —
   /// práve vtedy sú najviac na niečo, pretože povedia, či jednotka nevidí k
@@ -381,7 +435,7 @@ class _GenesisHomeState extends State<GenesisHome> {
       children: [
         Row(
           children: [
-            Text(_household, style: theme.textTheme.labelMedium),
+            Text(_householdLabel, style: theme.textTheme.labelMedium),
             if (_principal != null) ...[
               Text('  ·  ', style: theme.textTheme.labelMedium),
               Text('Rola: ${_principal!.role}', style: theme.textTheme.labelMedium),
@@ -389,7 +443,7 @@ class _GenesisHomeState extends State<GenesisHome> {
           ],
         ),
         const SizedBox(height: 6),
-        Text(_room, style: theme.textTheme.displaySmall),
+        Text(_scopeLabel, style: theme.textTheme.displaySmall),
         const SizedBox(height: 10),
         Container(
           height: 3,
@@ -405,13 +459,15 @@ class _GenesisHomeState extends State<GenesisHome> {
 
   Widget _devicesSection() {
     final theme = Theme.of(context);
+    final visible = _visibleDevices;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const ElysiumSectionLabel('Zariadenia'),
         const SizedBox(height: 10),
         Text(
-          'Inventár domácnosti. Priradenie do miestností pribudne po doplnení Genesis API.',
+          'Inventár domácnosti z Home Assistanta. Miestnosti aj ich priradenie '
+          'sú tie, ktoré sú nastavené tam.',
           style: theme.textTheme.bodyMedium,
         ),
         const SizedBox(height: 14),
@@ -428,14 +484,8 @@ class _GenesisHomeState extends State<GenesisHome> {
               ],
             ),
           ),
-        if (_devices.isEmpty && _inventoryError == null)
-          ElysiumCard(
-            child: Text(
-              'Zatiaľ nie sú načítané žiadne zariadenia.',
-              style: theme.textTheme.bodyMedium,
-            ),
-          ),
-        for (final device in _devices) ...[
+        if (visible.isEmpty && _inventoryError == null) _emptyDevicesCard(),
+        for (final device in visible) ...[
           _deviceCard(device),
           const SizedBox(height: 12),
         ],
@@ -471,6 +521,49 @@ class _GenesisHomeState extends State<GenesisHome> {
           ),
         ],
       ],
+    );
+  }
+
+  /// Prečo je zoznam prázdny.
+  ///
+  /// Prázdno má tri rôzne príčiny a nesmú vyzerať rovnako: ešte sme sa nepozreli,
+  /// pozreli sme sa a naozaj tam nič nie je, alebo sa pozrieť nedá. Posledné dve
+  /// vyzerajú v odpovedi identicky, preto inventár nesie so sebou stav prepojenia.
+  Widget _emptyDevicesCard() {
+    final theme = Theme.of(context);
+    final inventory = _inventory;
+    if (inventory == null) {
+      return ElysiumCard(
+        child: Text(
+          'Zatiaľ nie sú načítané žiadne zariadenia.',
+          style: theme.textTheme.bodyMedium,
+        ),
+      );
+    }
+    if (!inventory.isConnected) {
+      return ElysiumCard(
+        accent: ElysiumColors.caution,
+        child: Text(
+          'Prepojenie na Home Assistant nie je aktívne, takže inventár nevidíme. '
+          'Prázdny zoznam tu neznamená prázdnu domácnosť.',
+          style: theme.textTheme.bodyLarge,
+        ),
+      );
+    }
+    if (inventory.devices.isEmpty) {
+      return ElysiumCard(
+        child: Text(
+          'Home Assistant nehlási žiadne svetlo ani zásuvku. Domácnosť je '
+          'z pohľadu Genesisu prázdna.',
+          style: theme.textTheme.bodyMedium,
+        ),
+      );
+    }
+    return ElysiumCard(
+      child: Text(
+        'V tejto miestnosti nie je žiadne zariadenie.',
+        style: theme.textTheme.bodyMedium,
+      ),
     );
   }
 
@@ -677,7 +770,7 @@ class _GenesisHomeState extends State<GenesisHome> {
                 decoration: const InputDecoration(labelText: 'Prístupový token'),
                 onChanged: (_) => setState(() {
                   _principal = null;
-                  _devices = [];
+                  _inventory = null;
                 }),
               ),
               const SizedBox(height: 16),
@@ -958,6 +1051,8 @@ class _GenesisHomeState extends State<GenesisHome> {
 
   Widget _navigation(bool wide) {
     final theme = Theme.of(context);
+    final inventory = _inventory;
+    final withoutArea = inventory?.devicesWithoutArea ?? const <GenesisDevice>[];
     return ListView(
       padding: const EdgeInsets.symmetric(
         horizontal: 16,
@@ -973,17 +1068,14 @@ class _GenesisHomeState extends State<GenesisHome> {
         ],
         const Padding(
           padding: EdgeInsets.symmetric(horizontal: 8),
-          child: ElysiumSectionLabel('Domácnosti'),
+          child: ElysiumSectionLabel('Domácnosť'),
         ),
         const SizedBox(height: 8),
         _navTile(
-          label: 'Pilotná domácnosť',
+          label: _householdLabel,
           icon: Icons.home_outlined,
-          selected: _household == 'Pilotná domácnosť',
-          onTap: () {
-            setState(() => _household = 'Pilotná domácnosť');
-            if (!wide) Navigator.pop(context);
-          },
+          selected: _scope == AreaScope.whole,
+          onTap: () => _select(wide, AreaScope.whole, null),
         ),
         const SizedBox(height: ElysiumLayout.sectionSpacing),
         const Padding(
@@ -991,26 +1083,65 @@ class _GenesisHomeState extends State<GenesisHome> {
           child: ElysiumSectionLabel('Miestnosti'),
         ),
         const SizedBox(height: 8),
-        for (final room in _rooms)
-          _navTile(
-            label: room,
-            icon: Icons.door_front_door_outlined,
-            selected: _room == room,
-            onTap: () {
-              setState(() => _room = room);
-              if (!wide) Navigator.pop(context);
-            },
-          ),
-        const SizedBox(height: 16),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          child: Text(
-            'Pilotné miestnosti sú ukážkové.',
-            style: theme.textTheme.labelMedium,
-          ),
-        ),
+        if (inventory == null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Text(
+              'Miestnosti sa načítajú z domácnosti po zadaní adresy a tokenu.',
+              style: theme.textTheme.labelMedium,
+            ),
+          )
+        else ...[
+          for (final area in inventory.areas)
+            _navTile(
+              label: area.name,
+              icon: Icons.door_front_door_outlined,
+              selected: _scope == AreaScope.area && _areaId == area.areaId,
+              onTap: () => _select(wide, AreaScope.area, area.areaId),
+            ),
+          // Vlastná skupina, nie vymyslená miestnosť: zariadenie bez priradenia
+          // sa musí dať nájsť, ale nepatrí do žiadnej existujúcej miestnosti.
+          if (withoutArea.isNotEmpty)
+            _navTile(
+              label: 'Bez miestnosti (${withoutArea.length})',
+              icon: Icons.help_outline,
+              selected: _scope == AreaScope.withoutArea,
+              onTap: () => _select(wide, AreaScope.withoutArea, null),
+            ),
+          if (inventory.areas.isEmpty && withoutArea.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Text(
+                inventory.isConnected
+                    ? 'Home Assistant nehlási žiadne miestnosti.'
+                    : 'Prepojenie na Home Assistant nie je aktívne, miestnosti nevidíme.',
+                style: theme.textTheme.labelMedium,
+              ),
+            ),
+          if (inventory.roomsIncomplete) ...[
+            const SizedBox(height: 12),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Text(
+                'Register miestností sa nepodarilo prečítať celý, takže miestnosti '
+                'tu chýbajú aj vtedy, keď ich domácnosť má. Zariadenia sú tu všetky '
+                'a ovládať sa dajú. Register vyžaduje administrátorský token '
+                'Home Assistanta.',
+                style: theme.textTheme.labelMedium,
+              ),
+            ),
+          ],
+        ],
       ],
     );
+  }
+
+  void _select(bool wide, AreaScope scope, String? areaId) {
+    setState(() {
+      _scope = scope;
+      _areaId = areaId;
+    });
+    if (!wide) Navigator.pop(context);
   }
 
   Widget _navTile({

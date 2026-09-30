@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
@@ -18,7 +19,7 @@ use chrono::Utc;
 use genesis_core::{
     backup,
     grant::{self, AccessState},
-    ha::{self, HaConfig, Inventory, Link, LinkState, LinkStatus},
+    ha::{self, HaConfig, Inventory, Link, LinkState, LinkStatus, Registry, RegistrySnapshot},
     ha_command::{self, ExecutionError},
     identity::{self, Role},
     ledger::{Actor, ActorType, CommandRequest, Ledger, LedgerError, Snapshot},
@@ -211,6 +212,7 @@ struct AppState {
     ledger: Arc<Mutex<Ledger>>,
     ha_config: Option<HaConfig>,
     ha_link: Link,
+    ha_registry: Registry,
 }
 
 #[derive(Deserialize)]
@@ -229,6 +231,7 @@ fn app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/v1/me", get(me))
         .route("/v1/devices", get(devices))
+        .route("/v1/inventory", get(inventory))
         .route("/v1/commands", get(list_commands).post(create_command))
         .route("/v1/commands/{command_id}", get(get_command))
         .route("/v1/diagnostics", get(diagnostics))
@@ -297,12 +300,132 @@ fn with_ingress_guard(router: Router, ingress_only: bool) -> Router {
     }
 }
 
+/// Zariadenie tak, ako ho vydá API: pozorovaný stav plus miestnosť z registrov.
+///
+/// Miestnosť sa spája až tu. Inventár drží pozorovaný stav a mení sa s každou
+/// udalosťou; miestnosti sa menia zriedka a prichádzajú z iného zdroja. Keby
+/// `area_id` žilo v samotnom zariadení, každá zmena stavu by ho musela niesť so
+/// sebou a presun jednej entity by znamenal prepísať celý inventár.
+#[derive(Serialize)]
+struct DeviceView {
+    #[serde(flatten)]
+    device: ha::Device,
+    /// Chýba, keď zariadenie v Home Assistante miestnosť nemá. Je to legitímny
+    /// stav domácnosti, nie chyba.
+    area_id: Option<String>,
+    area_name: Option<String>,
+}
+
+fn device_views(devices: Vec<ha::Device>, rooms: &RegistrySnapshot) -> Vec<DeviceView> {
+    let names: BTreeMap<&str, &str> = rooms
+        .areas
+        .iter()
+        .map(|area| (area.area_id.as_str(), area.name.as_str()))
+        .collect();
+    devices
+        .into_iter()
+        .map(|device| {
+            let area_id = rooms.area_of_device.get(&device.device_id).cloned();
+            let area_name = area_id
+                .as_deref()
+                .and_then(|id| names.get(id))
+                .map(|name| (*name).to_owned());
+            DeviceView {
+                device,
+                area_id,
+                area_name,
+            }
+        })
+        .collect()
+}
+
 async fn devices(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<ha::Device>>, StatusCode> {
+) -> Result<Json<Vec<DeviceView>>, StatusCode> {
     principal(&headers, &state).await?;
-    Ok(Json(state.inventory.devices().await))
+    let rooms = state.ha_registry.snapshot().await;
+    Ok(Json(device_views(state.inventory.devices().await, &rooms)))
+}
+
+#[derive(Serialize)]
+struct InventoryView {
+    household: HouseholdView,
+    areas: Vec<AreaView>,
+    devices: Vec<DeviceView>,
+    home_assistant: InventorySource,
+}
+
+#[derive(Serialize)]
+struct HouseholdView {
+    household_id: String,
+    /// Názov domácnosti z Home Assistanta. Chýba, kým sedenie nenačíta
+    /// konfiguráciu, a panel si ho vtedy nesmie domyslieť.
+    name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AreaView {
+    area_id: String,
+    name: String,
+    /// Zariadenia v tejto miestnosti. Prázdna miestnosť sa neskrýva — v
+    /// domácnosti existuje aj vtedy, keď v nej zatiaľ nič nie je.
+    device_ids: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct InventorySource {
+    /// Stav prepojenia. Je v tejto odpovedi preto, aby sa prázdny inventár nedal
+    /// prečítať ako prázdna domácnosť: bez neho „nič nevidíme" a „nič tam nie je"
+    /// vyzerajú úplne rovnako.
+    state: LinkState,
+    /// Registre sa nepodarilo prečítať celé, takže miestnosti chýbajú aj vtedy,
+    /// keď ich domácnosť má. Stáva sa to pri tokene bez administrátorských práv.
+    rooms_incomplete: bool,
+}
+
+/// Domácnosť, jej miestnosti a jej zariadenia v jednej odpovedi.
+///
+/// V jednej preto, že miestnosti a zariadenia musia byť z toho istého okamihu.
+/// Dvoma dotazmi sa dá dostať zoznam miestností a k nemu zariadenie, ktoré
+/// ukazuje do miestnosti, čo medzitým zanikla.
+///
+/// Čítanie stačí s ktorýmkoľvek platným tokenom, rovnako ako `GET /v1/access`:
+/// rola rozhoduje o ovládaní, nie o tom, či člen domácnosti vidí, čo v nej je.
+/// Domácnosť je jedna na jednotku a token je na ňu naviazaný, takže iná
+/// domácnosť sa do odpovede dostať nemôže.
+async fn inventory(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<InventoryView>, StatusCode> {
+    principal(&headers, &state).await?;
+    let rooms = state.ha_registry.snapshot().await;
+    let devices = device_views(state.inventory.devices().await, &rooms);
+    let areas = rooms
+        .areas
+        .iter()
+        .map(|area| AreaView {
+            area_id: area.area_id.clone(),
+            name: area.name.clone(),
+            device_ids: devices
+                .iter()
+                .filter(|view| view.area_id.as_deref() == Some(area.area_id.as_str()))
+                .map(|view| view.device.device_id.clone())
+                .collect(),
+        })
+        .collect();
+    Ok(Json(InventoryView {
+        household: HouseholdView {
+            household_id: state.household_id.clone(),
+            name: rooms.location_name.clone(),
+        },
+        areas,
+        devices,
+        home_assistant: InventorySource {
+            state: state.ha_link.status().await.state,
+            rooms_incomplete: rooms.partial,
+        },
+    }))
 }
 
 #[derive(Serialize)]
@@ -978,10 +1101,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         LinkState::NotConfigured
     });
+    let ha_registry = Registry::new();
     if let Some(ha_config) = ha_config.clone() {
         tokio::spawn(ha::run(
             ha_config.clone(),
             inventory.clone(),
+            ha_registry.clone(),
             ha_link.clone(),
         ));
         tokio::spawn(reconcile_sweeper(
@@ -1007,6 +1132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ledger,
         ha_config,
         ha_link,
+        ha_registry,
     });
     let router = with_ingress_guard(
         router,
@@ -1052,6 +1178,7 @@ mod tests {
             ledger: Arc::new(Mutex::new(Ledger::open(":memory:").unwrap())),
             ha_config: None,
             ha_link: Link::default(),
+            ha_registry: Registry::new(),
         }
     }
 
@@ -1803,6 +1930,168 @@ mod tests {
             call(state, "GET", "/v1/commands?limit=5000", Some(&token), None).await;
         assert_eq!(capped, StatusCode::OK);
         assert_eq!(body.as_array().unwrap().len(), 2);
+    }
+
+    fn pilot_light(device_id: &str, name: &str) -> ha::Device {
+        ha::Device {
+            device_id: device_id.to_owned(),
+            provider: "home_assistant",
+            provider_device_ref: device_id.trim_start_matches("ha:").to_owned(),
+            name: name.to_owned(),
+            capability_id: "power",
+            capability_type: "switch",
+            writable: true,
+            power: Some(true),
+            observed_at: Some("2026-09-30T09:05:00Z".to_owned()),
+            availability: ha::Availability::Online,
+        }
+    }
+
+    fn pilot_rooms() -> RegistrySnapshot {
+        RegistrySnapshot {
+            location_name: Some("Doma".to_owned()),
+            areas: vec![
+                ha::Area {
+                    area_id: "ha:living_room".to_owned(),
+                    name: "Obývačka".to_owned(),
+                },
+                // Miestnosť, v ktorej zatiaľ nič nie je. V domácnosti existuje.
+                ha::Area {
+                    area_id: "ha:bedroom".to_owned(),
+                    name: "Spálňa".to_owned(),
+                },
+            ],
+            area_of_device: [("ha:light.living".to_owned(), "ha:living_room".to_owned())]
+                .into_iter()
+                .collect(),
+            partial: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_inventory_joins_rooms_onto_devices_and_keeps_empty_rooms() {
+        let token = "f".repeat(32);
+        let mut state = test_state(Some(token.clone()));
+        state.inventory = Inventory::with(vec![
+            pilot_light("ha:light.living", "Veľké svetlo"),
+            // Bez miestnosti — v Home Assistante ju nemá.
+            pilot_light("ha:switch.plug", "Zásuvka"),
+        ]);
+        state.ha_registry = Registry::with(pilot_rooms());
+        state.ha_link = Link::new(LinkState::Connected);
+
+        let (status, body) = call(state.clone(), "GET", "/v1/inventory", Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        // Domácnosť sa pomenúva podľa Home Assistanta, nie podľa panela.
+        assert_eq!(body["household"]["household_id"], "pilot-home");
+        assert_eq!(body["household"]["name"], "Doma");
+
+        let areas = body["areas"].as_array().unwrap();
+        assert_eq!(areas.len(), 2);
+        assert_eq!(areas[0]["area_id"], "ha:living_room");
+        assert_eq!(
+            areas[0]["device_ids"],
+            serde_json::json!(["ha:light.living"])
+        );
+        // Prázdna miestnosť zostáva v odpovedi.
+        assert_eq!(areas[1]["area_id"], "ha:bedroom");
+        assert_eq!(areas[1]["device_ids"], serde_json::json!([]));
+
+        let devices = body["devices"].as_array().unwrap();
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0]["device_id"], "ha:light.living");
+        assert_eq!(devices[0]["area_name"], "Obývačka");
+        // Zariadenie bez miestnosti sa k žiadnej nepriradí, ani k vymyslenej.
+        assert_eq!(devices[1]["device_id"], "ha:switch.plug");
+        assert_eq!(devices[1]["area_id"], Value::Null);
+        assert_eq!(devices[1]["area_name"], Value::Null);
+        // Pôvodný tvar zariadenia zostáva; miestnosť sú dve nové polia.
+        assert_eq!(devices[0]["availability"], "online");
+        assert_eq!(devices[0]["power"], true);
+
+        assert_eq!(body["home_assistant"]["state"], "connected");
+        assert_eq!(body["home_assistant"]["rooms_incomplete"], false);
+
+        // To isté pripojenie miestnosti vidí aj pôvodný inventár zariadení.
+        let (status, body) = call(state, "GET", "/v1/devices", Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body[0]["area_name"], "Obývačka");
+    }
+
+    #[tokio::test]
+    async fn an_empty_household_is_not_the_same_as_a_lost_connection() {
+        let token = "g".repeat(32);
+        // Spojené a naozaj prázdne: v domácnosti nie je žiadne svetlo ani zásuvka.
+        let mut empty = test_state(Some(token.clone()));
+        empty.ha_link = Link::new(LinkState::Connected);
+        let (status, body) = call(empty, "GET", "/v1/inventory", Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["devices"], serde_json::json!([]));
+        assert_eq!(body["areas"], serde_json::json!([]));
+        assert_eq!(body["home_assistant"]["state"], "connected");
+
+        // Nespojené: zariadenia môžu existovať, len ich nevidíme. Odpoveď je
+        // rovnako prázdna, a práve preto musí niesť stav prepojenia.
+        let mut lost = test_state(Some(token.clone()));
+        lost.ha_link = Link::new(LinkState::Disconnected);
+        let (status, body) = call(lost, "GET", "/v1/inventory", Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["devices"], serde_json::json!([]));
+        assert_eq!(body["home_assistant"]["state"], "disconnected");
+
+        // Registre neprečítané celé: domácnosť miestnosti má, my ich nevieme.
+        let mut blind = test_state(Some(token.clone()));
+        blind.ha_link = Link::new(LinkState::Connected);
+        blind.inventory = Inventory::with(vec![pilot_light("ha:light.living", "Veľké svetlo")]);
+        blind.ha_registry = Registry::with(RegistrySnapshot {
+            partial: true,
+            ..Default::default()
+        });
+        let (status, body) = call(blind, "GET", "/v1/inventory", Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["areas"], serde_json::json!([]));
+        assert_eq!(body["home_assistant"]["rooms_incomplete"], true);
+        assert_eq!(body["household"]["name"], Value::Null);
+        // Zariadenie je ovládateľné aj bez miestnosti.
+        assert_eq!(body["devices"][0]["writable"], true);
+    }
+
+    #[tokio::test]
+    async fn the_inventory_needs_a_token_and_a_guest_may_read_but_not_command() {
+        let mut state = test_state(None);
+        let guest = "h".repeat(32);
+        state.guest_token = Some(guest.clone());
+        state.inventory = Inventory::with(vec![pilot_light("ha:light.living", "Veľké svetlo")]);
+        state.ha_registry = Registry::with(pilot_rooms());
+
+        let (unauthorized, _) = call(state.clone(), "GET", "/v1/inventory", None, None).await;
+        assert_eq!(unauthorized, StatusCode::UNAUTHORIZED);
+
+        // Rola rozhoduje o ovládaní, nie o tom, či člen domácnosti vidí, čo v nej
+        // je — rovnako ako pri prehľade prístupov.
+        let (readable, body) =
+            call(state.clone(), "GET", "/v1/inventory", Some(&guest), None).await;
+        assert_eq!(readable, StatusCode::OK);
+        assert_eq!(body["devices"][0]["area_name"], "Obývačka");
+
+        let (forbidden, _) = call(
+            state,
+            "POST",
+            "/v1/commands",
+            Some(&guest),
+            Some(
+                serde_json::json!({
+                    "household_id": "pilot-home",
+                    "device_id": "ha:light.living",
+                    "value": false,
+                    "idempotency_key": "guest-1",
+                    "correlation_id": "guest-1"
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(forbidden, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
