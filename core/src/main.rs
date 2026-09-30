@@ -30,6 +30,7 @@ struct Config {
     member_token: Option<String>,
     guest_token: Option<String>,
     household_id: String,
+    sensitive_devices: Vec<String>,
 }
 
 impl Config {
@@ -52,6 +53,11 @@ impl Config {
             .filter(|token| !token.is_empty());
         config.household_id =
             env::var("GENESIS_HOUSEHOLD_ID").unwrap_or_else(|_| "pilot-home".to_owned());
+        config.sensitive_devices = parse_sensitive_devices(
+            env::var("GENESIS_SENSITIVE_DEVICES")
+                .unwrap_or_default()
+                .as_str(),
+        )?;
         if config
             .read_token
             .as_ref()
@@ -109,8 +115,33 @@ impl Config {
             member_token: None,
             guest_token: None,
             household_id: "pilot-home".to_owned(),
+            sensitive_devices: Vec::new(),
         })
     }
+}
+
+/// Zariadenia, ktoré prevádzkovateľ označil za citlivé. Genesis nevie, čo je za
+/// zásuvkou; vie to ten, kto ju zapojil.
+fn parse_sensitive_devices(raw: &str) -> Result<Vec<String>, String> {
+    let mut devices = Vec::new();
+    for entry in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        if entry.len() > 128
+            || !entry.as_bytes()[0].is_ascii_alphanumeric()
+            || !entry
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+        {
+            return Err(
+                "GENESIS_SENSITIVE_DEVICES must be a comma-separated list of device ids".to_owned(),
+            );
+        }
+        devices.push(entry.to_owned());
+    }
+    Ok(devices)
 }
 
 #[derive(Clone)]
@@ -121,6 +152,7 @@ struct AppState {
     member_token: Option<String>,
     guest_token: Option<String>,
     household_id: String,
+    sensitive_devices: Arc<Vec<String>>,
     ledger: Arc<Mutex<Ledger>>,
     ha_config: Option<HaConfig>,
 }
@@ -144,6 +176,11 @@ fn app(state: AppState) -> Router {
         .route("/v1/commands/{command_id}", get(get_command))
         .route("/v1/access", get(access))
         .route("/v1/voice/commands", axum::routing::post(voice_command))
+        .route(
+            "/v1/voice/confirmations",
+            axum::routing::post(voice_confirmation),
+        )
+        .route("/v1/voice/audit", get(voice_audit))
         .with_state(state)
 }
 
@@ -229,7 +266,8 @@ async fn create_command(
     headers: HeaderMap,
     Json(input): Json<NewCommand>,
 ) -> Result<Json<Snapshot>, StatusCode> {
-    let caller = authorized_controller(&headers, &state, &input.household_id)?;
+    let caller = authorized_controller(&headers, &state, &input.household_id)
+        .map_err(|refusal| refusal.status)?;
     let ha_config = state
         .ha_config
         .as_ref()
@@ -259,6 +297,9 @@ async fn create_command(
 /// klienta, nie povel.
 const MAX_TRANSCRIPT: usize = 200;
 
+/// Identifikátor potvrdenia je UUID; dlhší vstup netreba ani čítať.
+const MAX_CONFIRMATION_ID: usize = 64;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpokenCommand {
@@ -283,7 +324,7 @@ async fn voice_command(
     headers: HeaderMap,
     Json(input): Json<SpokenCommand>,
 ) -> Result<(StatusCode, Json<voice::Outcome>), StatusCode> {
-    let caller = authorized_controller(&headers, &state, &input.household_id)?;
+    let caller = authorized_speaker(&headers, &state, &input.household_id).await?;
     let transcript = input.transcript.trim();
     if transcript.is_empty() || transcript.chars().count() > MAX_TRANSCRIPT {
         return Err(StatusCode::BAD_REQUEST);
@@ -305,18 +346,95 @@ async fn voice_command(
             idempotency_key: input.idempotency_key,
             correlation_id: input.correlation_id,
         },
+        &state.sensitive_devices,
         Utc::now(),
     )
     .await
     .map_err(map_execution_error)?;
-    match &outcome {
-        voice::Outcome::Executed { .. } => Ok((StatusCode::OK, Json(outcome))),
-        // Log nesmie obsahovať to, čo bolo povedané, iba prečo sa nič nestalo.
+    Ok(answer(outcome))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpokenConfirmation {
+    household_id: String,
+    confirmation_id: String,
+}
+
+/// Potvrdenie citlivej hlasovej akcie.
+///
+/// Potvrdenie platí raz, krátko a iba pre toho, kto o akciu požiadal. Zamietnutie
+/// sa vracia s 422, nie 200, a do auditu ide presnejšie, než sa povie volajúcemu.
+async fn voice_confirmation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SpokenConfirmation>,
+) -> Result<(StatusCode, Json<voice::Outcome>), StatusCode> {
+    let caller = authorized_speaker(&headers, &state, &input.household_id).await?;
+    if input.confirmation_id.is_empty() || input.confirmation_id.len() > MAX_CONFIRMATION_ID {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let ha_config = state
+        .ha_config
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let mut ledger = state.ledger.lock().await;
+    let outcome = voice::confirm(
+        ha_config,
+        &state.inventory,
+        &mut ledger,
+        &state.household_id,
+        caller,
+        &input.confirmation_id,
+        Utc::now(),
+    )
+    .await
+    .map_err(map_execution_error)?;
+    Ok(answer(outcome))
+}
+
+/// Audit hlasových akcií: čo sa rozhodlo, kým a prečo.
+///
+/// Iba na čítanie, takže stačí ktorýkoľvek platný token. Odpoveď neobsahuje
+/// prepis ani identifikátor potvrdenia — audit dokladá rozhodnutie, nie obsah.
+async fn voice_audit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<voice::AuditEvent>>, StatusCode> {
+    principal(&headers, &state)?;
+    let ledger = state.ledger.lock().await;
+    voice::audit_trail(&ledger, &state.household_id)
+        .map(Json)
+        .map_err(|error| {
+            tracing::error!(%error, "reading the voice audit failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
+/// Stavový kód k výsledku. Iba vykonaný povel je 200; čokoľvek iné sa nesmie dať
+/// pochopiť ako hotovo. Log nesie dôvod, nikdy nie to, čo bolo povedané.
+fn answer(outcome: voice::Outcome) -> (StatusCode, Json<voice::Outcome>) {
+    let status = match &outcome {
+        voice::Outcome::Executed { .. } => StatusCode::OK,
+        voice::Outcome::ConfirmationRequired { .. } => StatusCode::ACCEPTED,
         voice::Outcome::Unclear(unclear) => {
             tracing::info!(reason = unclear.reason, "voice command not executed");
-            Ok((StatusCode::UNPROCESSABLE_ENTITY, Json(outcome)))
+            StatusCode::UNPROCESSABLE_ENTITY
         }
-    }
+        voice::Outcome::Refused { explanation } => {
+            tracing::info!(reason = explanation.code, "voice command refused");
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
+    };
+    (status, Json(outcome))
+}
+
+/// Zamietnutie ovládania. `attributable` je vyplnené len vtedy, keď token
+/// platil — bez platného tokenu Genesis nevie, komu by zápis pripísal, a audit
+/// od anonymných volajúcich by sa dal beztrestne nafúknuť.
+struct ControlRefusal {
+    status: StatusCode,
+    attributable: Option<(&'static str, &'static str)>,
 }
 
 /// Aktér, ktorý smie ovládať zariadenia v pilotnej domácnosti. Panel aj hlas
@@ -325,18 +443,52 @@ fn authorized_controller(
     headers: &HeaderMap,
     state: &AppState,
     household_id: &str,
-) -> Result<Actor, StatusCode> {
-    let caller = principal(headers, state)?;
+) -> Result<Actor, ControlRefusal> {
+    let caller = principal(headers, state).map_err(|status| ControlRefusal {
+        status,
+        attributable: None,
+    })?;
     if !caller.can_control_devices {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ControlRefusal {
+            status: StatusCode::FORBIDDEN,
+            attributable: Some((caller.actor_id, voice::ROLE_NOT_PERMITTED)),
+        });
     }
     if household_id != state.household_id {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ControlRefusal {
+            status: StatusCode::FORBIDDEN,
+            attributable: Some((caller.actor_id, voice::OTHER_HOUSEHOLD)),
+        });
     }
     Ok(Actor {
         actor_type: ActorType::User,
         actor_id: caller.actor_id.to_owned(),
     })
+}
+
+/// Autorizácia hlasovej akcie. Na rozdiel od panela sa pripísateľné zamietnutie
+/// zapíše do auditu, aby sa dalo doložiť, že a prečo asistent odmietol.
+async fn authorized_speaker(
+    headers: &HeaderMap,
+    state: &AppState,
+    household_id: &str,
+) -> Result<Actor, StatusCode> {
+    match authorized_controller(headers, state, household_id) {
+        Ok(actor) => Ok(actor),
+        Err(refusal) => {
+            if let Some((actor_id, reason)) = refusal.attributable {
+                let mut ledger = state.ledger.lock().await;
+                voice::record_refusal(
+                    &mut ledger,
+                    &state.household_id,
+                    actor_id,
+                    reason,
+                    Utc::now(),
+                );
+            }
+            Err(refusal.status)
+        }
+    }
 }
 
 async fn get_command(
@@ -450,6 +602,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             member_token: config.member_token,
             guest_token: config.guest_token,
             household_id: config.household_id,
+            sensitive_devices: Arc::new(config.sensitive_devices),
             ledger,
             ha_config,
         }),
@@ -483,6 +636,7 @@ mod tests {
             member_token: None,
             guest_token: None,
             household_id: "pilot-home".to_owned(),
+            sensitive_devices: Arc::new(Vec::new()),
             ledger: Arc::new(Mutex::new(Ledger::open(":memory:").unwrap())),
             ha_config: None,
         }
@@ -497,6 +651,18 @@ mod tests {
     #[test]
     fn config_rejects_invalid_bind_address() {
         assert!(Config::from_values(Some("0.0.0.0"), None).is_err());
+    }
+
+    #[test]
+    fn sensitive_devices_are_parsed_and_validated() {
+        assert!(parse_sensitive_devices("").unwrap().is_empty());
+        assert_eq!(
+            parse_sensitive_devices(" ha:switch.boiler , ha:switch.gate ").unwrap(),
+            ["ha:switch.boiler", "ha:switch.gate"]
+        );
+        // Čokoľvek, čo by ledger neprijal ako identifikátor, zastaví štart.
+        assert!(parse_sensitive_devices("ha:switch.boiler, nie platné").is_err());
+        assert!(parse_sensitive_devices("-leading").is_err());
     }
 
     #[test]
@@ -806,6 +972,109 @@ mod tests {
             .await,
             StatusCode::BAD_REQUEST
         );
+    }
+
+    async fn post_confirmation(state: AppState, token: Option<&str>, body: String) -> StatusCode {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v1/voice/confirmations")
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        app(state)
+            .oneshot(request.body(Body::from(body)).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn audit_trail(state: AppState, token: Option<&str>) -> (StatusCode, Value) {
+        let mut request = Request::builder().uri("/v1/voice/audit");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let response = app(state)
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 8192).await.unwrap();
+        let parsed = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        (status, parsed)
+    }
+
+    fn confirmation_body(household_id: &str, confirmation_id: &str) -> String {
+        serde_json::json!({
+            "household_id": household_id,
+            "confirmation_id": confirmation_id
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_confirmation_needs_a_controlling_role_and_a_usable_id() {
+        let mut state = test_state(Some("r".repeat(32)));
+        state.write_token = Some("o".repeat(32));
+        state.guest_token = Some("g".repeat(32));
+        let body = confirmation_body("pilot-home", "5cf1d9f4-0000-4000-8000-000000000000");
+
+        assert_eq!(
+            post_confirmation(state.clone(), None, body.clone()).await,
+            StatusCode::UNAUTHORIZED
+        );
+        // Potvrdiť citlivú akciu môže iba ten, kto smie ovládať zariadenia.
+        assert_eq!(
+            post_confirmation(state.clone(), Some(&"g".repeat(32)), body.clone()).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            post_confirmation(
+                state.clone(),
+                Some(&"o".repeat(32)),
+                confirmation_body("pilot-home", "")
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        // Owner prejde kontrolami a zastaví sa až na chýbajúcom Home Assistantovi.
+        assert_eq!(
+            post_confirmation(state, Some(&"o".repeat(32)), body).await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn an_attributable_refusal_reaches_the_audit() {
+        let mut state = test_state(Some("r".repeat(32)));
+        state.write_token = Some("o".repeat(32));
+        state.guest_token = Some("g".repeat(32));
+        let body = spoken_body("pilot-home", "zapni svetlo");
+
+        // Bez tokenu Genesis nevie, komu by zápis pripísal, takže nezapíše nič.
+        assert_eq!(
+            post_voice(state.clone(), None, body.clone()).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            audit_trail(state.clone(), Some(&"r".repeat(32))).await.1,
+            serde_json::json!([])
+        );
+
+        // Guest je zamietnutý a to sa dá doložiť.
+        assert_eq!(
+            post_voice(state.clone(), Some(&"g".repeat(32)), body).await,
+            StatusCode::FORBIDDEN
+        );
+        let (status, trail) = audit_trail(state.clone(), Some(&"r".repeat(32))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(trail[0]["decision"], "refused");
+        assert_eq!(trail[0]["reason"], "role_not_permitted");
+        assert_eq!(trail[0]["actor_id"], "pilot-guest");
+        assert!(trail[1].is_null());
+
+        // Audit je chránený tokenom ako každé čítanie.
+        assert_eq!(audit_trail(state, None).await.0, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
