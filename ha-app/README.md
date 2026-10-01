@@ -27,7 +27,7 @@ Repozitár aj GHCR balík `os-genesis-pilot` sú verejne dostupné na čítanie.
 
 Verzia `0.1.4` prináša ELYSIUM-353 až ELYSIUM-357: skutočný stav povelu a ledger v paneli, miestnosti z Home Assistanta namiesto troch napísaných, podpísaný kanál z Behavior, párovanie a odobranie prístupu a prehľad časových prístupov s incidentmi. Je publikovaná (`sha256:97502fb4…`, tá istá ako nemenná `sha-34a1768`) — to znamená stiahnuteľná, nie overená: na skutočný Home Assistant Green ju zatiaľ nikto nenainštaloval.
 
-Verzia `0.1.5` prináša ELYSIUM-358 až ELYSIUM-360: hlasový povel a potvrdenie citlivej akcie v paneli, prevádzkové centrum so zálohou a prehľadom stavu, a verzovaný iOS projekt. Na skutočný Green ju zatiaľ nikto nenainštaloval.
+Verzia `0.1.5` prináša ELYSIUM-358 až ELYSIUM-360: hlasový povel a potvrdenie citlivej akcie v paneli, prevádzkové centrum so zálohou a prehľadom stavu, a verzovaný iOS projekt. Je publikovaná (`sha256:cb9b0e0f…`, tá istá ako nemenná `sha-556c43d`) — to znamená stiahnuteľná, nie overená: na skutočný Home Assistant Green ju zatiaľ nikto nenainštaloval. ELYSIUM-361 (odmietnutie nešifrovaného spojenia mimo lokálnej siete) je v `main` až po `0.1.5`, takže vo vydanej verzii nie je.
 
 Pri `0.1.5` som znova prešiel, čo core číta z prostredia a čo mu app nastavuje. Tentoraz nič tmavé nepribudlo: jediná premenná, ktorú `run.sh` nenastavuje, je `GENESIS_LOG` — úroveň logovania s funkčným predvolením, teda ladenie, nie funkcia. Vystavená ako možnosť app nie je a tento release ju nepridáva.
 

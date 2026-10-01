@@ -86,9 +86,13 @@ Doteraz vydané:
 | `0.1.2` | `sha256:1ef49e43…` | Ingress, panel v pôvodnom Material vzhľade |
 | `0.1.3` | `sha256:1e049fc2…` | panel v Elysium dizajne |
 | `0.1.4` | `sha256:97502fb4…` | ELYSIUM-353–357 a zapnutie zálohy, citlivých zariadení a Behavior kanála v app |
-| `0.1.5` | doplní sa po publikovaní | ELYSIUM-358–360: hlas v paneli, prevádzkové centrum, verzovaný iOS projekt |
+| `0.1.5` | `sha256:cb9b0e0f…` | ELYSIUM-358–360: hlas v paneli, prevádzkové centrum, verzovaný iOS projekt |
 
 Digest sa dá doplniť až po publikovaní: obraz vzniká pri pushi do `main`, takže v čase, keď sa `version` zvyšuje, ešte neexistuje. Riadok je preto záznam o tom, čo bolo vydané, nie plán.
+
+Verzia `0.1.5` nesie ten istý obraz ako nemenná značka `sha-556c43d` (plný digest `sha256:cb9b0e0f3c6bdde0a4ed509d3d17dbad6138f1bee28d6173f7bd80820053c89b`, commit `556c43d6ad972a8db6b387e6c252350d9ec2c73a`). Digest je odčítaný z publikačného behu a overený proti GHCR; pri tom istom dotaze vrátili `0.1.4` a `0.1.3` presne tie digesty, ktoré sú v tabuľke vyššie — to je kontrola, ktorá robí nový riadok overeným, nie iba vierohodným.
+
+**ELYSIUM-361 v `0.1.5` nie je.** Je v `main` od `23a665d`, teda až po tom, čo sa `0.1.5` publikovala. Publikačný beh po jej zlúčení značku verzie neposunie a napíše varovanie, že `0.1.5` v registri už je — to je zámer, nie porucha: obsah vydanej verzie sa nesmie meniť pod tým istým číslom.
 
 Verzia `0.1.4` nesie ten istý obraz ako nemenná značka `sha-34a1768` (plný digest `sha256:97502fb4ad903f9ae38377c86f8af6cbe73d9567c541bfcb62b1654d19dc10ca`, commit `34a17681e844b9d04d76fa7a126ad26e1e2cb3f8`). Rovnaký digest pre obe značky je dôkaz, že sa publikoval presne ten obraz, ktorý prešiel smoke testom — workflow robí `docker tag`, nie druhý build.
 
