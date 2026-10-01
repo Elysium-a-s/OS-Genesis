@@ -10,6 +10,37 @@ Výber sa viaže na `area_id`, ktoré sa pri premenovaní miestnosti nemení. Ke
 
 Prázdny zoznam má tri rôzne príčiny a panel ich nezlieva: ešte sa nepozeral, pozrel sa a domácnosť je naozaj prázdna, alebo sa pozrieť nedá. Posledné dve vyzerajú v odpovedi rovnako, preto inventár nesie so sebou stav prepojenia. Keď sa register miestností nepodarilo prečítať celý (vyžaduje administrátorský token Home Assistanta), panel to napíše a zariadenia ukáže všetky.
 
+## Prístup: párovanie a odobranie
+
+Vlastník vydá párovací kód cez `POST /v1/pairings`, člen ho uplatní cez `POST /v1/pairings/redeem`, vlastník vidí vydané identity na `GET /v1/credentials` a prístup odoberie cez `DELETE /v1/credentials/{id}`. Backend tok je z ELYSIUM-347; panel k nemu dáva rozhranie.
+
+**Kód aj token sa zobrazia práve raz.** Jednotka si z nich drží len odtlačok, takže ich nevie vydať druhýkrát ani vlastníkovi — a panel to pri zobrazení kódu napíše, aby to nebolo prekvapenie.
+
+**Kód ide v tele požiadavky, nikdy v adrese.** To isté platí pre token: ten je v hlavičke `Authorization`. Testy to tvrdia explicitne — prejdú každú odoslanú požiadavku a overia, že v žiadnej URL kód ani token nie je.
+
+**Vypršaný, už uplatnený a odobraný kód vyzerajú rovnako.** Jednotka medzi nimi nerozlišuje a panel to nedopĺňa: hádať, ktorý z tých troch to bol, by bola informácia o cudzej domácnosti. Panel povie jednu vetu a odkáže na vlastníka.
+
+**Po odobraní panel prístup stratí.** Jednotka odpovie 401, klient to má vlastný typ (`GenesisUnauthorized`) a nerieši to ako chybu siete: token sa zahodí z úložiska aj z poľa a panel požiada o nové párovanie. Opakovať by nepomohlo a cyklus panelu sa na prázdny token už nepozrie.
+
+**Rola rozhoduje.** Vydávať a odoberať smie iba vlastník; člen a hosť vidia namiesto toho vysvetlenie a panel sa o zoznam identít ani nepokúsi. Uplatniť kód smie každý — je to jediná cesta, ako sa k prístupu dostať.
+
+### Kde token žije
+
+`GenesisTokenStore` je rozhranie práve preto, že „bezpečné úložisko" znamená na každej platforme niečo iné:
+
+| platforma | čo to je |
+| --- | --- |
+| iOS, iPadOS | Keychain — skutočné zabezpečené úložisko mimo procesu aplikácie |
+| web | `flutter_secure_storage` hodnotu zašifruje, ale kľúč uloží do toho istého `localStorage` — **zabezpečené úložisko to nie je** |
+
+Vo webe je skutočnou hranicou prihlásenie do Home Assistanta pred Ingressom a pôvod stránky, nie toto úložisko. Je to napísané takto priamo preto, že z názvu balíka by sa dalo vyčítať viac, než platí.
+
+Ukladá sa preto, že párovací kód sa dá uplatniť raz: token iba v pamäti by znamenal, že člen po obnovení stránky o prístup prišiel a nový kód mu nemá kto vydať okrem vlastníka.
+
+### Čo je na tom zatiaľ nepohodlné
+
+Pri uplatnení kódu treba zadať aj identifikátor domácnosti. Jednotka síce obsluhuje jedinú domácnosť, ale `redeem` ju v tele očakáva, a člen, ktorý ešte token nemá, si ju nemá odkiaľ prečítať — všetky čítania domácnosti sú za tokenom. Vlastník ju teda posiela spolu s kódom. Dalo by sa to odstrániť tým, že by ju jednotka uvádzala neautentizovane, čo ale rozširuje to, čo sa dá o jednotke zistiť bez prístupu; to je rozhodnutie o bezpečnosti, nie o pohodlí, a nepatrí do tohto tiketu.
+
 ## Stav povelu, ledger a diagnostika
 
 Panel číta detail povelu z `GET /v1/commands/{command_id}` a rozlišuje všetkých šesť stavov ledgeru po jednom — `accepted`, `sent`, `provider_confirmed`, `device_confirmed`, `unknown`, `failed` — s časom zmeny a s dôkazom, keď nejaký je. `provider_ack` a `device_observation` sa nezlievajú do jednej vety: iba to druhé hovorí o fyzickom svete. Stav, ktorý panel nepozná, sa nikdy nezobrazí ako úspech.

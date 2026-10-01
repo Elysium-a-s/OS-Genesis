@@ -144,7 +144,7 @@ void main() {
     });
 
     await tester.pumpWidget(GenesisApp(client: client));
-    await tester.enterText(find.byType(TextField).at(1), 'a' * 32);
+    await tester.enterText(find.widgetWithText(TextField, 'Prístupový token'), 'a' * 32);
     // Panel číta sám dokola; pätnásta sekunda je jeho vlastný cyklus, takže
     // test nemusí siahať na tlačidlo mimo obrazovky.
     await tester.pump(const Duration(seconds: 15));
@@ -153,6 +153,7 @@ void main() {
     final before = tester.widget<Switch>(find.byType(Switch));
     expect(before.onChanged, isNotNull);
 
+    await tester.ensureVisible(find.byType(Switch));
     await tester.tap(find.byType(Switch));
     await _settle(tester);
 
@@ -176,12 +177,14 @@ void main() {
     // Zopakovanie sa neponúka: prepínač je zamknutý a druhý pokus o dotyk
     // nepošle nič.
     expect(tester.widget<Switch>(find.byType(Switch)).onChanged, isNull);
+    await tester.ensureVisible(find.byType(Switch));
     await tester.tap(find.byType(Switch));
     await _settle(tester);
     expect(issued, 1);
 
     // Ponúka sa jediná bezpečná akcia — prečítať stav znova.
     expect(find.text('Obnoviť stav'), findsOneWidget);
+    await tester.ensureVisible(find.text('Obnoviť stav'));
     await tester.tap(find.text('Obnoviť stav'));
     await _settle(tester);
     expect(detailReads, 1);
@@ -231,7 +234,7 @@ void main() {
     });
 
     await tester.pumpWidget(GenesisApp(client: client));
-    await tester.enterText(find.byType(TextField).at(1), 'b' * 32);
+    await tester.enterText(find.widgetWithText(TextField, 'Prístupový token'), 'b' * 32);
     await tester.pump(const Duration(seconds: 15));
     await _settle(tester);
 
