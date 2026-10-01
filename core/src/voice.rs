@@ -1675,6 +1675,28 @@ mod tests {
         .unwrap();
         assert_eq!(refused["outcome"], "refused");
         assert_eq!(refused["explanation"]["code"], EXPIRED_CONFIRMATION);
+
+        // Citlivá akcia nesie intent a identifikátor potvrdenia, a **žiadny
+        // povel**: nič sa nevykonalo. Tvar intentu je pripnutý preto, že na ňom
+        // stojí panel (ELYSIUM-358) — `intent` je vnorený objekt s vlastným
+        // diskriminátorom, nie reťazec, a zmena by sa inak ukázala až v UI.
+        let awaiting = serde_json::to_value(Outcome::ConfirmationRequired {
+            intent: Intent::SetPower {
+                device_id: "ha:lock.front".to_owned(),
+                value: false,
+            },
+            confirmation_id: "7f3a".to_owned(),
+            expires_at: "2026-09-29T18:32:00.000Z".to_owned(),
+            explanation: explain_reason(CONFIRMATION_REQUIRED),
+        })
+        .unwrap();
+        assert_eq!(awaiting["outcome"], "confirmation_required");
+        assert_eq!(awaiting["intent"]["intent"], "set_power");
+        assert_eq!(awaiting["intent"]["device_id"], "ha:lock.front");
+        assert_eq!(awaiting["intent"]["value"], false);
+        assert_eq!(awaiting["confirmation_id"], "7f3a");
+        assert_eq!(awaiting["explanation"]["code"], CONFIRMATION_REQUIRED);
+        assert!(awaiting["command"].is_null());
     }
 
     #[test]

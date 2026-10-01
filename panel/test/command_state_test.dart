@@ -123,6 +123,7 @@ void main() {
             ),
             200);
       }
+      if (path.endsWith('/v1/voice/audit')) return _ok('[]', 200);
       if (path.endsWith('/v1/access')) return _ok('[]', 200);
       if (path.endsWith('/v1/diagnostics')) {
         return _ok(_diagnostics('connected'), 200);
@@ -227,6 +228,7 @@ void main() {
             ),
             200);
       }
+      if (path.endsWith('/v1/voice/audit')) return _ok('[]', 200);
       if (path.endsWith('/v1/access')) return _ok('[]', 200);
       if (path.endsWith('/v1/diagnostics')) {
         return _ok(

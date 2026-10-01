@@ -561,6 +561,152 @@ class GenesisReconcileReceipt {
       );
 }
 
+/// Typovaný intent, ktorý jednotka z prepisu zložila.
+///
+/// Nesie zariadenie, nie to, čo bolo povedané. Práve to je zmysel prekladu
+/// prepisu na intent: ďalej v systéme už nikto nepracuje s textom.
+class GenesisVoiceIntent {
+  const GenesisVoiceIntent({required this.deviceId, required this.value});
+
+  final String deviceId;
+  final bool value;
+
+  factory GenesisVoiceIntent.fromJson(Map<String, dynamic> json) =>
+      GenesisVoiceIntent(
+        deviceId: json['device_id'] as String,
+        value: json['value'] as bool,
+      );
+}
+
+/// Vysvetlenie výsledku. `code` je pre klienta, `message` pre človeka.
+class GenesisExplanation {
+  const GenesisExplanation({required this.code, required this.message});
+
+  final String code;
+  final String message;
+
+  factory GenesisExplanation.fromJson(Map<String, dynamic> json) =>
+      GenesisExplanation(
+        code: json['code'] as String,
+        message: json['message'] as String,
+      );
+}
+
+/// Výsledok hlasového povelu.
+///
+/// Štyri stavy a **ani jeden z nich nie je chyba klienta**. Jednotka vracia
+/// nejednoznačný a zamietnutý povel s 422, čo je stále odpoveď o domácnosti, nie
+/// porucha — preto to tu nie je výnimka, ale hodnota. Keby to bola výnimka,
+/// panel by nemal čo zobraziť práve v tých prípadoch, kde človek najviac
+/// potrebuje vedieť prečo.
+class GenesisVoiceOutcome {
+  const GenesisVoiceOutcome({
+    required this.outcome,
+    this.intent,
+    this.command,
+    this.explanation,
+    this.confirmationId,
+    this.expiresAt,
+    this.reason,
+    this.candidates = const [],
+    this.message,
+  });
+
+  /// `executed`, `confirmation_required`, `unclear` alebo `refused`.
+  final String outcome;
+  final GenesisVoiceIntent? intent;
+
+  /// Povel v ledgeri. Len pri `executed` — inak sa nič nevykonalo a nič
+  /// nevzniklo.
+  final GenesisCommand? command;
+  final GenesisExplanation? explanation;
+
+  /// Identifikátor potvrdenia citlivej akcie. Platí raz a krátko.
+  final String? confirmationId;
+  final DateTime? expiresAt;
+
+  /// Prečo sa povel nedal pochopiť (`unclear`).
+  final String? reason;
+
+  /// Zariadenia, medzi ktorými sa jednotka nerozhodla.
+  final List<String> candidates;
+  final String? message;
+
+  factory GenesisVoiceOutcome.fromJson(Map<String, dynamic> json) {
+    final intent = json['intent'];
+    final command = json['command'] as Map<String, dynamic>?;
+    final explanation = json['explanation'] as Map<String, dynamic>?;
+    return GenesisVoiceOutcome(
+      outcome: json['outcome'] as String,
+      // `intent` je vnorený objekt s vlastným diskriminátorom `intent`, nie
+      // reťazec. Tvar je pripnutý testom `the_outcome_names_itself_on_the_wire`
+      // v `core/src/voice.rs`, aby sa zmena kontraktu neukázala až tu.
+      intent: intent is Map<String, dynamic>
+          ? GenesisVoiceIntent.fromJson(intent)
+          : null,
+      command: command == null ? null : GenesisCommand.fromJson(command),
+      explanation:
+          explanation == null ? null : GenesisExplanation.fromJson(explanation),
+      confirmationId: json['confirmation_id'] as String?,
+      expiresAt: DateTime.tryParse(json['expires_at'] as String? ?? ''),
+      reason: json['reason'] as String?,
+      candidates: ((json['candidates'] as List<dynamic>?) ?? const [])
+          .map((item) => item as String)
+          .toList(),
+      message: json['message'] as String?,
+    );
+  }
+
+  bool get wasExecuted => outcome == 'executed';
+
+  /// Citlivá akcia. **Nič sa nevykonalo** a čaká sa na výslovné potvrdenie.
+  bool get needsConfirmation => outcome == 'confirmation_required';
+  bool get isUnclear => outcome == 'unclear';
+  bool get wasRefused => outcome == 'refused';
+
+  /// Či sa niečo stalo so zariadením. Pre tri zo štyroch stavov je to nepravda a
+  /// panel to nesmie zliať do „neúspechu": nevykonané z opatrnosti a nevykonané
+  /// pre nepochopenie sú pre človeka dve rôzne veci.
+  bool get touchedTheHouse => wasExecuted;
+}
+
+/// Záznam auditu hlasovej akcie.
+///
+/// Zámerne bez prepisu a bez identifikátora potvrdenia: audit dokladá
+/// rozhodnutie, nie obsah toho, čo bolo povedané.
+class GenesisVoiceAuditEvent {
+  const GenesisVoiceAuditEvent({
+    required this.eventId,
+    required this.actorId,
+    required this.decision,
+    required this.reason,
+    required this.deviceId,
+    required this.commandId,
+    required this.at,
+  });
+
+  final String eventId;
+  final String actorId;
+
+  /// `executed`, `refused` alebo `awaiting_confirmation`.
+  final String decision;
+  final String reason;
+  final String? deviceId;
+  final String? commandId;
+  final DateTime? at;
+
+  factory GenesisVoiceAuditEvent.fromJson(Map<String, dynamic> json) =>
+      GenesisVoiceAuditEvent(
+        eventId: json['event_id'] as String,
+        actorId: json['actor_id'] as String,
+        decision: json['decision'] as String,
+        reason: json['reason'] as String,
+        deviceId: json['device_id'] as String?,
+        commandId: json['command_id'] as String?,
+        at: DateTime.tryParse(json['at'] as String? ?? ''),
+      );
+}
+
 class GenesisApi {
   GenesisApi({required this.baseUrl, http.Client? client})
       : _client = client ?? http.Client(),
@@ -793,6 +939,91 @@ class GenesisApi {
       throw StateError('Genesis reconciliation HTTP ${response.statusCode}');
     }
     return GenesisReconcileReceipt.fromJson(_asObject(response));
+  }
+
+  /// Odošle prepis a vráti, čo s ním jednotka urobila.
+  ///
+  /// 200, 202 aj 422 sú **odpovede**, nie chyby: vykonané, čaká na potvrdenie,
+  /// nepochopené a zamietnuté. Preto sa telo číta pri všetkých. Keby 422
+  /// vyhodilo výnimku, panel by nemal čo povedať práve tam, kde človek
+  /// potrebuje dôvod.
+  ///
+  /// Prepis ide v tele, nikdy v adrese — je to obsah toho, čo niekto povedal vo
+  /// svojej domácnosti, a adresy sa logujú na miestach, ktoré nemáme v rukách.
+  Future<GenesisVoiceOutcome> speak({
+    required String accessToken,
+    required String householdId,
+    required String transcript,
+    required bool storeTranscript,
+  }) async {
+    final key = 'panel-voice-${DateTime.now().microsecondsSinceEpoch}';
+    final response = await _client.post(
+      _path('v1/voice/commands'),
+      headers: {
+        'Authorization': 'Bearer $accessToken',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({
+        'household_id': householdId,
+        'transcript': transcript,
+        'store_transcript': storeTranscript,
+        'idempotency_key': key,
+        'correlation_id': key,
+      }),
+    ).timeout(const Duration(seconds: 15));
+    _refuseIfUnauthorized(response, 'voice');
+    return _voiceOutcome(response, 'voice');
+  }
+
+  /// Potvrdí citlivú akciu.
+  ///
+  /// Identifikátor potvrdenia je jednorazové oprávnenie vykonať konkrétnu akciu,
+  /// takže ide v tele ako párovací kód — nie v adrese.
+  Future<GenesisVoiceOutcome> confirmSpoken({
+    required String accessToken,
+    required String householdId,
+    required String confirmationId,
+  }) async {
+    final response = await _client.post(
+      _path('v1/voice/confirmations'),
+      headers: {
+        'Authorization': 'Bearer $accessToken',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({
+        'household_id': householdId,
+        'confirmation_id': confirmationId,
+      }),
+    ).timeout(const Duration(seconds: 15));
+    _refuseIfUnauthorized(response, 'confirmation');
+    return _voiceOutcome(response, 'confirmation');
+  }
+
+  /// Telo hlasovej odpovede. 200, 202 a 422 nesú výsledok; čokoľvek iné je
+  /// skutočná chyba a nie je sa čoho držať.
+  GenesisVoiceOutcome _voiceOutcome(http.Response response, String what) {
+    if (response.statusCode != 200 &&
+        response.statusCode != 202 &&
+        response.statusCode != 422) {
+      throw StateError('Genesis $what HTTP ${response.statusCode}');
+    }
+    return GenesisVoiceOutcome.fromJson(_asObject(response));
+  }
+
+  /// Audit hlasových rozhodnutí, najnovšie prvé. Číta ho každá rola.
+  Future<List<GenesisVoiceAuditEvent>> voiceAudit(String accessToken) async {
+    final response = await _client.get(
+      _path('v1/voice/audit'),
+      headers: {'Authorization': 'Bearer $accessToken'},
+    ).timeout(const Duration(seconds: 5));
+    _refuseIfUnauthorized(response, 'voice audit');
+    if (response.statusCode != 200) {
+      throw StateError('Genesis voice audit HTTP ${response.statusCode}');
+    }
+    return _asList(response)
+        .map((item) =>
+            GenesisVoiceAuditEvent.fromJson(item as Map<String, dynamic>))
+        .toList();
   }
 
   void close() {

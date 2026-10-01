@@ -91,6 +91,16 @@ class _GenesisHomeState extends State<GenesisHome> {
   bool _busyWithAccess = false;
   List<GenesisGrant> _grants = [];
   String? _grantsError;
+  final _transcript = TextEditingController();
+
+  /// Súhlas s uložením prepisu. **Vypnutý, kým ho človek nezapne** — prepis je
+  /// obsah toho, čo niekto povedal vo svojej domácnosti.
+  bool _storeTranscript = false;
+  GenesisVoiceOutcome? _spokenOutcome;
+  String? _voiceError;
+  bool _speaking = false;
+  List<GenesisVoiceAuditEvent> _voiceAudit = [];
+  String? _voiceAuditError;
 
   /// Grant, nad ktorým práve beží vyžiadané zosúladenie. Druhé stlačenie by
   /// nespôsobilo druhý povel — jednotka to nepustí — ale tlačidlo, ktoré
@@ -135,6 +145,10 @@ class _GenesisHomeState extends State<GenesisHome> {
       _grants = [];
       _grantsError = null;
       _reconcileNotice = null;
+      _spokenOutcome = null;
+      _voiceAudit = [];
+      _voiceAuditError = null;
+      _voiceError = null;
       _accessToken.clear();
       _accessNotice =
           'Prístup bol odobraný alebo vypršal. Požiadaj vlastníka o nový párovací kód.';
@@ -301,6 +315,31 @@ class _GenesisHomeState extends State<GenesisHome> {
       }
     }
     await _refreshAccess(api);
+    await _refreshVoiceAudit(api);
+  }
+
+  /// Audit hlasových rozhodnutí. Číta ho každá rola — kto v domácnosti žije, má
+  /// vedieť, čo tu hlas urobil, aj keď to nebol on.
+  Future<void> _refreshVoiceAudit(GenesisApi api) async {
+    try {
+      final trail = await api.voiceAudit(_accessToken.text);
+      if (mounted) {
+        setState(() {
+          _voiceAudit = trail;
+          _voiceAuditError = null;
+        });
+      }
+    } on GenesisUnauthorized {
+      await _accessWasRefused();
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _voiceAudit = [];
+          _voiceAuditError =
+              'Audit hlasu sa nepodarilo prečítať. Nevieme, čo sa rozhodlo.';
+        });
+      }
+    }
   }
 
   /// Časové prístupy. Číta to každá rola — kto v domácnosti žije, má vedieť, že
@@ -479,6 +518,7 @@ class _GenesisHomeState extends State<GenesisHome> {
     _pairingActor.dispose();
     _redeemCode.dispose();
     _redeemHousehold.dispose();
+    _transcript.dispose();
     super.dispose();
   }
 
@@ -572,6 +612,8 @@ class _GenesisHomeState extends State<GenesisHome> {
                   _diagnosticsSection(),
                   const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
                   _grantsSection(),
+                  const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
+                  _voiceSection(),
                   const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
                   _accessSection(),
                   const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
@@ -810,6 +852,378 @@ class _GenesisHomeState extends State<GenesisHome> {
       ],
     );
   }
+
+  /// Odošle prepis jednotke.
+  ///
+  /// Výsledok sa nastaví pri každom zo štyroch stavov. Nejednoznačný a
+  /// zamietnutý povel prichádzajú s 422, čo klient nerieši ako chybu — je to
+  /// odpoveď o domácnosti, a práve tam človek najviac potrebuje dôvod.
+  Future<void> _speak() async {
+    final base = _baseUrl();
+    final household = _inventory?.householdId;
+    final transcript = _transcript.text.trim();
+    if (base == null || household == null || transcript.isEmpty) return;
+    setState(() {
+      _speaking = true;
+      _voiceError = null;
+    });
+    try {
+      final api = GenesisApi(baseUrl: base, client: _client);
+      final outcome = await api.speak(
+        accessToken: _accessToken.text,
+        householdId: household,
+        transcript: transcript,
+        storeTranscript: _storeTranscript,
+      );
+      if (!mounted) return;
+      setState(() {
+        _spokenOutcome = outcome;
+        // Pole sa čistí len vtedy, keď sa niečo stalo alebo sa už nedá
+        // zopakovať. Pri nepochopenom povele text zostáva, aby sa dal upraviť.
+        if (!outcome.isUnclear) _transcript.clear();
+      });
+      await _refreshVoiceAudit(api);
+      if (outcome.wasExecuted) await _refreshDevices();
+    } on GenesisUnauthorized {
+      await _accessWasRefused();
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _spokenOutcome = null;
+          _voiceError =
+              'Povel sa nepodarilo odoslať. Nevieme, či sa niečo vykonalo — '
+              'skontrolujte stav zariadenia a audit.';
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _speaking = false);
+    }
+  }
+
+  /// Potvrdí citlivú akciu. Až toto ju vykoná; dovtedy sa nestalo nič.
+  Future<void> _confirmSpoken(String confirmationId) async {
+    final base = _baseUrl();
+    final household = _inventory?.householdId;
+    if (base == null || household == null) return;
+    setState(() {
+      _speaking = true;
+      _voiceError = null;
+    });
+    try {
+      final api = GenesisApi(baseUrl: base, client: _client);
+      final outcome = await api.confirmSpoken(
+        accessToken: _accessToken.text,
+        householdId: household,
+        confirmationId: confirmationId,
+      );
+      if (!mounted) return;
+      setState(() => _spokenOutcome = outcome);
+      await _refreshVoiceAudit(api);
+      if (outcome.wasExecuted) await _refreshDevices();
+    } on GenesisUnauthorized {
+      await _accessWasRefused();
+    } catch (_) {
+      if (mounted) {
+        setState(() => _voiceError =
+            'Potvrdenie sa nepodarilo odoslať. Platí krátko, takže ho možno '
+            'bude treba vyžiadať znova.');
+      }
+    } finally {
+      if (mounted) setState(() => _speaking = false);
+    }
+  }
+
+  /// Hlasový povel textom.
+  ///
+  /// Mikrofón tu nie je a ani sa nepredstiera: panel neberie zvuk, takže žiadne
+  /// surové audio nevzniká a nie je čo ukladať. Rozpoznávanie reči cez Home
+  /// Assistant Assist alebo iný výslovný adaptér je samostatný krok — tento
+  /// tiket dáva bezpečnú textovú cestu k tomu istému intentu.
+  Widget _voiceSection() {
+    final theme = Theme.of(context);
+    final principal = _principal;
+    final canSpeak = principal?.canControlDevices ?? false;
+    final ready = _inventory != null && _accessToken.text.isNotEmpty;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const ElysiumSectionLabel('Hlasový povel'),
+        const SizedBox(height: 10),
+        Text(
+          'Prepis prejde tou istou cestou ako hlas: jednotka ho preloží na intent '
+          'a ďalej už pracuje so zariadením, nie s textom. Mikrofón v paneli nie '
+          'je, takže žiadne surové audio nevzniká — rozpoznávanie reči je '
+          'samostatný krok.',
+          style: theme.textTheme.bodyMedium,
+        ),
+        const SizedBox(height: 14),
+        if (!ready)
+          ElysiumCard(
+            child: Text(
+              'Bez prístupového tokenu a inventára sa povel odoslať nedá.',
+              style: theme.textTheme.bodyMedium,
+            ),
+          )
+        else if (!canSpeak)
+          ElysiumCard(
+            child: Text(
+              'Hlas nedáva viac práv než panel: ovládať zariadenia smie vlastník '
+              'a člen, nie hosť. Rozhodnutie robí jednotka, nie panel.',
+              style: theme.textTheme.bodyMedium,
+            ),
+          )
+        else
+          _speakCard(principal!),
+        if (_spokenOutcome != null) ...[
+          const SizedBox(height: 12),
+          _outcomeCard(_spokenOutcome!),
+        ],
+        if (_voiceError != null) ...[
+          const SizedBox(height: 12),
+          ElysiumCard(
+            child: Text(_voiceError!, style: theme.textTheme.bodyMedium),
+          ),
+        ],
+        const SizedBox(height: 14),
+        _voiceAuditCard(),
+      ],
+    );
+  }
+
+  Widget _speakCard(GenesisPrincipal principal) {
+    final theme = Theme.of(context);
+    return ElysiumCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            controller: _transcript,
+            decoration: const InputDecoration(
+              labelText: 'Povel',
+              hintText: 'napríklad: zhasni svetlo v obývačke',
+            ),
+            onSubmitted: _speaking ? null : (_) => _speak(),
+          ),
+          const SizedBox(height: 10),
+          // Identitu aktéra určuje jednotka podľa tokenu, nie panel. Píše sa
+          // tu preto, že do auditu pôjde práve toto meno.
+          Text(
+            'Vykoná sa ako ${principal.actorId} (${principal.role}). '
+            'Identitu určuje jednotka podľa tokenu.',
+            style: theme.textTheme.labelMedium,
+          ),
+          const SizedBox(height: 10),
+          // Zámerne `Checkbox` v riadku, nie `CheckboxListTile`: ten kreslí
+          // pozadie a ink na najbližší `Material`, ktorým je tu dekorovaná
+          // karta, takže by boli neviditeľné.
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Checkbox(
+                value: _storeTranscript,
+                onChanged: _speaking
+                    ? null
+                    : (value) =>
+                        setState(() => _storeTranscript = value ?? false),
+              ),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 12),
+                    Text('Uložiť prepis k povelu',
+                        style: theme.textTheme.bodyMedium),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Bez súhlasu si jednotka prepis nenechá — uloží len intent '
+                      'a rozhodnutie. Audit funguje aj tak.',
+                      style: theme.textTheme.labelMedium,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: FilledButton(
+              onPressed: _speaking ? null : _speak,
+              child: Text(_speaking ? 'Odosiela sa…' : 'Odoslať povel'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Výsledok povelu. Štyri stavy a každý iná veta — zliať ich do „úspech/chyba"
+  /// by zahodilo práve to, čo je na tom bezpečné.
+  Widget _outcomeCard(GenesisVoiceOutcome outcome) {
+    final theme = Theme.of(context);
+    final colors = ElysiumColors.of(context);
+    final (label, color) = _outcomePresentation(outcome);
+    return ElysiumCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(_outcomeTitle(outcome),
+                    style: theme.textTheme.titleMedium),
+              ),
+              const SizedBox(width: 12),
+              ElysiumStatusPill(label: label, color: color),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Divider(color: colors.border, height: 1),
+          const SizedBox(height: 14),
+          Text(_outcomeDetail(outcome), style: theme.textTheme.bodyMedium),
+          if (outcome.explanation != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Dôvod: ${outcome.explanation!.code}',
+              style: theme.textTheme.labelMedium,
+            ),
+          ],
+          // Nejednoznačný povel: aspoň sa dá povedať, medzi čím sa jednotka
+          // nerozhodla. Hádať jedno z nich by bola tá najhoršia odpoveď.
+          if (outcome.candidates.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text('Jednotka sa nerozhodla medzi:',
+                style: theme.textTheme.labelMedium),
+            for (final candidate in outcome.candidates)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(_deviceLabel(candidate),
+                    style: theme.textTheme.bodyMedium),
+              ),
+          ],
+          if (outcome.wasExecuted && outcome.command != null) ...[
+            const SizedBox(height: 10),
+            for (final line in _commandDetails(outcome.command!))
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(line, style: theme.textTheme.labelMedium),
+              ),
+          ],
+          if (outcome.needsConfirmation && outcome.confirmationId != null) ...[
+            const SizedBox(height: 14),
+            Text(
+              outcome.expiresAt == null
+                  ? 'Potvrdenie platí krátko a práve raz.'
+                  : 'Potvrdenie platí do ${_formatMoment(outcome.expiresAt!.toLocal())} a práve raz.',
+              style: theme.textTheme.labelMedium,
+            ),
+            const SizedBox(height: 10),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: FilledButton(
+                onPressed: _speaking
+                    ? null
+                    : () => _confirmSpoken(outcome.confirmationId!),
+                child: Text(_speaking ? 'Potvrdzuje sa…' : 'Potvrdiť akciu'),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  (String, Color) _outcomePresentation(GenesisVoiceOutcome outcome) =>
+      switch (outcome.outcome) {
+        'executed' => ('Vykonané', ElysiumColors.teal),
+        'confirmation_required' =>
+          ('Čaká na potvrdenie', ElysiumColors.caution),
+        'unclear' => ('Nevykonané', ElysiumColors.electricBlue),
+        'refused' => ('Zamietnuté', ElysiumColors.danger),
+        // Stav, ktorý panel nepozná, sa nikdy nezobrazí ako úspech.
+        _ => ('Neznámy výsledok', ElysiumColors.caution),
+      };
+
+  String _outcomeTitle(GenesisVoiceOutcome outcome) {
+    final intent = outcome.intent;
+    if (intent == null) return 'Povel sa nevykonal';
+    return '${_deviceLabel(intent.deviceId)} — '
+        '${intent.value ? "zapnúť" : "vypnúť"}';
+  }
+
+  String _outcomeDetail(GenesisVoiceOutcome outcome) => switch (outcome.outcome) {
+        'executed' => outcome.explanation?.message ??
+            'Povel je v ledgeri. Stav zariadenia je v sekcii Zariadenia.',
+        'confirmation_required' =>
+          'Citlivá akcia: nič sa nevykonalo a zariadenie sa nepohlo. Jednotka '
+              'čaká na výslovné potvrdenie a bez neho neurobí nič.',
+        'unclear' => outcome.message ??
+            'Jednotka povel nepochopila, takže nevykonala nič.',
+        'refused' => outcome.explanation?.message ??
+            'Jednotka povel zamietla.',
+        _ => 'Jednotka odpovedala stavom, ktorý panel nepozná. '
+            'Nepovažujte to za vykonané.',
+      };
+
+  /// Názov zariadenia z inventára, inak identifikátor. Vymyslieť názov by
+  /// znamenalo tvrdiť o domácnosti niečo, čo z odpovede neplynie.
+  String _deviceLabel(String deviceId) {
+    final device = _inventory?.devices
+        .where((candidate) => candidate.id == deviceId)
+        .firstOrNull;
+    return device?.name ?? deviceId;
+  }
+
+  Widget _voiceAuditCard() {
+    final theme = Theme.of(context);
+    if (_voiceAuditError != null) {
+      return ElysiumCard(
+        child: Text(_voiceAuditError!, style: theme.textTheme.bodyMedium),
+      );
+    }
+    if (_voiceAudit.isEmpty) {
+      return ElysiumCard(
+        child: Text(
+          'Audit hlasu je prázdny: jednotka zatiaľ o žiadnom hlasovom povele '
+          'nerozhodovala.',
+          style: theme.textTheme.bodyMedium,
+        ),
+      );
+    }
+    return ElysiumCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Audit hlasu', style: theme.textTheme.titleMedium),
+          const SizedBox(height: 4),
+          Text(
+            'Čo sa rozhodlo, kým a prečo. Prepis tu nie je ani vtedy, keď bol '
+            'uložený — audit dokladá rozhodnutie, nie obsah.',
+            style: theme.textTheme.labelMedium,
+          ),
+          const SizedBox(height: 12),
+          for (final event in _voiceAudit.take(8))
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                '${_auditDecision(event.decision)} · ${event.reason} · '
+                '${event.actorId}'
+                '${event.at == null ? "" : " · ${_formatMoment(event.at!.toLocal())}"}',
+                style: theme.textTheme.labelMedium,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  String _auditDecision(String decision) => switch (decision) {
+        'executed' => 'Vykonané',
+        'refused' => 'Zamietnuté',
+        'awaiting_confirmation' => 'Čakalo na potvrdenie',
+        _ => decision,
+      };
 
   /// Časový prístup: čo Behavior otvorilo a čo sa z toho vrátilo späť.
   ///
