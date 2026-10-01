@@ -157,6 +157,24 @@ Odpovede sa dekódujú výslovne ako UTF-8 z `bodyBytes`, nie cez `response.body
 
 Webový panel v Home Assistant app verzie `0.1.2` sa otvára cez HA Ingress a automaticky použije rovnakú adresu pre API. Na iPade ako samostatnej natívnej aplikácii treba adresu Genesis API určiť podľa plánovaného spôsobu bezpečného prístupu; port 8765 sa v HA app už nepublikuje. Stav **Online** znamená úspešné volanie health endpointu, nepotvrdzuje HA inventár ani fyzické zariadenia. Prístupový token sa drží iba v pamäti otvoreného panelu a zobrazuje sa ako heslo. Panel nevydáva `provider_confirmed` za zmenu fyzického zariadenia; neistý výsledok označí `unknown`. Prepínač sa deaktivuje pri nedostupnom HA spojení, neznámom stave a tiež vtedy, keď posledný povel na tom zariadení skončil neisto. HA `last_updated` je čas poslednej zmeny zariadenia, nie lehota platnosti stavu; panel ho zobrazuje iba ako informáciu. Povel naslepo znova neodosielajte — panel to pri neistom výsledku ani neponúkne a namiesto toho ponúka prečítanie stavu z ledgeru.
 
+## Kam sa panel smie pripojiť
+
+Nešifrované spojenie je prijaté **len na lokálnu sieť**, a je to to isté pravidlo, ktoré vynucuje iOS cez `NSAllowsLocalNetworking`. Keby sa klient a platforma rozchádzali, jedna z nich by mlčky vyhrala a človek by nevedel ktorá.
+
+| adresa | verdikt |
+| --- | --- |
+| `https://…` kdekoľvek | prijaté, šifrované |
+| `http://` na loopback, privátne IPv4 rozsahy, link-local, CGNAT, `::1`, `fe80::/10`, `fc00::/7`, `*.local`, meno bez domény | prijaté, **pilotný režim** — panel to napíše |
+| `http://` na čokoľvek iné | **odmietnuté** |
+
+**Odmietnutie nie je nápis.** `GenesisAddress` je jediné miesto, kde sa o adrese rozhoduje, takže pri odmietnutej adrese neodošle nič ani pätnáctsekundový cyklus, ani tlačidlá — tie sú deaktivované. Test to tvrdí tým, že zoznam odoslaných požiadaviek je **prázdny**.
+
+**Pri pochybnosti sa háda v prospech šifrovania.** `green.local.example.com` nie je `.local`, `192.168.1` nie je adresa a `10.0.0.1.evil.com` nie je privátny rozsah.
+
+Pilotný režim panel pomenuje nahlas: token a povely nevychádzajú z vašej siete, ale kto v nej už je, ich vidí. Celý trust model vrátane cesty cez HA Ingress a reverzný proxy je v [docs/ELYSIUM-361-prenos.md](../docs/ELYSIUM-361-prenos.md).
+
+Overenie certifikátu má vlastný test so **skutočným TLS serverom s vlastným podpisom** (`test/tls_test.dart`). Musí byť v samostatnom súbore bez `testWidgets`: `flutter_test` pri inicializácii widget bindingu presmeruje `HttpClient` na klienta, ktorý na všetko odpovie HTTP 400, a test by prešiel alebo padol z nesprávneho dôvodu.
+
 ## Nainštalovaná aplikácia na iPade a iPhone
 
 Bundle identifier je `com.elysium.genesis.panel`, minimálny systém iOS/iPadOS 15.0, flavor žiadny. Celé rozhodnutie vrátane postupu podpisu a TestFlightu je v [docs/ELYSIUM-360-ios-aplikacia.md](../docs/ELYSIUM-360-ios-aplikacia.md).
