@@ -10,6 +10,38 @@ Výber sa viaže na `area_id`, ktoré sa pri premenovaní miestnosti nemení. Ke
 
 Prázdny zoznam má tri rôzne príčiny a panel ich nezlieva: ešte sa nepozeral, pozrel sa a domácnosť je naozaj prázdna, alebo sa pozrieť nedá. Posledné dve vyzerajú v odpovedi rovnako, preto inventár nesie so sebou stav prepojenia. Keď sa register miestností nepodarilo prečítať celý (vyžaduje administrátorský token Home Assistanta), panel to napíše a zariadenia ukáže všetky.
 
+## Prevádzka: čo beží, čo sa pokazilo a čo je zazálohované
+
+Päť vecí, ktoré sa môžu pokaziť **nezávisle od seba**, a preto majú päť riadkov v jednej karte:
+
+| riadok | zdroj | čo to nehovorí |
+| --- | --- | --- |
+| Genesis jednotka | `GET /health` | nič o Home Assistantovi — `/health` odpovedá aj keď WebSocket sedenie spadlo |
+| Home Assistant | `GET /v1/diagnostics` | nič o tom, či je inventár aktuálny |
+| Inventár | `GET /v1/inventory` | nič o incidentoch |
+| Otvorené incidenty | spočítané z `GET /v1/access` | nič o tom, či existuje záloha |
+| Posledná záloha | `GET /v1/backup` | nič o tom, či sa dá obnoviť |
+
+Zliať ich do jediného „stav systému" by zahodilo presne tú informáciu, pre ktorú tam prevádzkovateľ chodí. Test to tvrdí na tom najnepríjemnejšom prípade: zdravá jednotka so spadnutým spojením na Home Assistanta.
+
+Incidenty sa počítajú z toho, čo panel už má z `/v1/access` — vlastné API na to nie je a netreba ho vyrábať.
+
+### Záloha
+
+`POST /v1/backup` je `VACUUM INTO` za behu, takže výsledok je celý a platný aj vtedy, keď sa práve zapisuje — na rozdiel od skopírovania súboru. `GET /v1/backup` vracia, čo jednotka má, najnovšie prvé. Oboje smie **iba vlastník**; člen a hosť vidia vysvetlenie a panel sa o zoznam ani nepokúsi.
+
+**Čas zálohy sa berie z mena súboru, nie z času úpravy.** Ten sa dá zmeniť kopírovaním aj `touch`-om, kým meno hovorí, kedy záloha skutočne vznikla. Meno sa skladá a rozoberá na jednom mieste, takže sa tie dve veci nemôžu rozísť, a dvojbodky sa vracajú iba do časovej časti za `T` — slepé `-` → `:` by zlomilo dátum, ktorý spojovníky nesie legitímne. Čo sa nedá prečítať ako RFC 3339, sa z prehľadu zahodí: cudzí súbor v priečinku nie je záloha a hlásiť ho ako zálohu by bolo horšie než ho nevidieť.
+
+**Tri stavy, ktoré sa nezlievajú:** nenastavené zálohovanie (503), žiadna záloha (prázdny zoznam) a neprečítateľný zoznam. Prvé je stav jednotky, druhé stav domácnosti, tretie neznalosť. Zliať prvé dve by znamenalo tvrdiť, že zálohovanie funguje a nikto ho nepoužil.
+
+**Existujúcu zálohu jednotka neprepíše** (409). Panel to povie ako fakt o bezpečnosti — predchádzajúca záloha zostáva neporušená — nie ako zlyhanie, pretože záloha, ktorá prepíše predchádzajúcu, je horšia než chýbajúca.
+
+### Obnova: prečo tu tlačidlo nie je
+
+**Obnovu panel nerobí a nebude.** Nie je to chýbajúca funkcia: služba si nedokáže bezpečne podsunúť databázu sama sebe pod otvoreným spojením, takže tlačidlo „obnoviť" by bolo operáciou, ktorá môže poškodiť práve ten stav, ktorý má zachraňovať. Postup sa robí pri zastavenej službe a je v [docs/ELYSIUM-348-obnova.md](../docs/ELYSIUM-348-obnova.md) spolu s aktualizáciou a rollbackom — a rollback nie je len o obraze, pretože staršia verzia novšiu databázu odmietne.
+
+Reštartový test na skutočnom Home Assistant Green zostáva v ELYSIUM-350; emulovaný kontajner v CI ho nenahrádza.
+
 ## Časový prístup: granty, incidenty a relock
 
 Sekcia **Časový prístup** číta `GET /v1/access` a stojí na jedinom rozlíšení: **evidencia na jednotke nie je stav zariadenia.** Grant môže byť `relocked` a žiarovka svietiť; môže byť `relock_pending` a byť dávno zhasnutá. Preto má každý grant dva samostatné riadky a panel ich nikdy nezlieva do jednej vety:
@@ -105,7 +137,7 @@ Panel číta detail povelu z `GET /v1/commands/{command_id}` a rozlišuje všetk
 
 Sekcia **Ledger** ukazuje posledné povely z `GET /v1/commands`, aby sa neistý povel dal nájsť aj po obnovení stránky, keď už jeho `command_id` nikto nemá.
 
-Sekcia **Diagnostika** ukazuje stav jednotky a stav prepojenia Genesis↔Home Assistant **oddelene**, z `GET /v1/diagnostics`. Zelená jednotka neznamená, že sa inventár hýbe: `/health` odpovedá aj vtedy, keď WebSocket sedenie k Home Assistantovi spadlo. Nenastavené prepojenie sa zobrazuje ako vlastný stav, nie ako porucha.
+Stav jednotky a stav prepojenia Genesis↔Home Assistant sú v sekcii **Prevádzka** (nižšie) a sú tam **oddelene**, z `GET /v1/diagnostics`.
 
 ## Vývoj
 

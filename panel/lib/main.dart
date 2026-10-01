@@ -101,6 +101,13 @@ class _GenesisHomeState extends State<GenesisHome> {
   bool _speaking = false;
   List<GenesisVoiceAuditEvent> _voiceAudit = [];
   String? _voiceAuditError;
+  List<GenesisBackup> _backups = [];
+  String? _backupsError;
+
+  /// Nastavené zálohovanie je iné než zálohovanie, ktoré nikto nepoužil.
+  bool _backupsConfigured = true;
+  String? _backupNotice;
+  bool _backingUp = false;
 
   /// Grant, nad ktorým práve beží vyžiadané zosúladenie. Druhé stlačenie by
   /// nespôsobilo druhý povel — jednotka to nepustí — ale tlačidlo, ktoré
@@ -149,6 +156,9 @@ class _GenesisHomeState extends State<GenesisHome> {
       _voiceAudit = [];
       _voiceAuditError = null;
       _voiceError = null;
+      _backups = [];
+      _backupsError = null;
+      _backupNotice = null;
       _accessToken.clear();
       _accessNotice =
           'Prístup bol odobraný alebo vypršal. Požiadaj vlastníka o nový párovací kód.';
@@ -205,7 +215,10 @@ class _GenesisHomeState extends State<GenesisHome> {
           _keepSelectionValid(inventory);
         });
       }
-      if (principal.role == 'owner') await _refreshCredentials();
+      if (principal.role == 'owner') {
+        await _refreshCredentials();
+        await _refreshBackups();
+      }
     } on GenesisUnauthorized {
       await _accessWasRefused();
       return;
@@ -609,7 +622,7 @@ class _GenesisHomeState extends State<GenesisHome> {
                   const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
                   _devicesSection(),
                   const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
-                  _diagnosticsSection(),
+                  _operationsSection(),
                   const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
                   _grantsSection(),
                   const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
@@ -773,61 +786,6 @@ class _GenesisHomeState extends State<GenesisHome> {
   /// odpovedá na ňu zeleno aj vtedy, keď WebSocket sedenie k Home Assistantovi
   /// spadlo. Keby panel ukazoval len ju, kontrolka by svietila nad inventárom,
   /// ktorý sa už nehýbe.
-  Widget _diagnosticsSection() {
-    final theme = Theme.of(context);
-    final colors = ElysiumColors.of(context);
-    final link = _diagnostics?.homeAssistant;
-    final (linkLabel, linkColor) = _linkPresentation(link);
-    final (healthLabel, healthColor) = _healthPresentation();
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const ElysiumSectionLabel('Diagnostika'),
-        const SizedBox(height: 10),
-        Text(
-          'Odpovedajúca jednotka a dostupný Home Assistant sú dve rôzne veci. '
-          'Zelená jednotka neznamená, že sa inventár hýbe.',
-          style: theme.textTheme.bodyMedium,
-        ),
-        const SizedBox(height: 14),
-        ElysiumCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _diagnosticsRow(
-                'Genesis jednotka',
-                'Odpoveď na /health',
-                healthLabel,
-                healthColor,
-              ),
-              const SizedBox(height: 14),
-              _diagnosticsRow(
-                'Home Assistant',
-                'WebSocket sedenie a inventár',
-                linkLabel,
-                linkColor,
-              ),
-              if (_diagnosticsError != null) ...[
-                const SizedBox(height: 14),
-                Text(_diagnosticsError!, style: theme.textTheme.bodySmall),
-              ],
-              if (link != null) ...[
-                const SizedBox(height: 14),
-                Divider(color: colors.border, height: 1),
-                const SizedBox(height: 14),
-                for (final line in _linkDetails(link, _diagnostics!))
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
-                    child: Text(line, style: theme.textTheme.labelMedium),
-                  ),
-              ],
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
   Widget _diagnosticsRow(
     String title,
     String detail,
@@ -931,6 +889,294 @@ class _GenesisHomeState extends State<GenesisHome> {
     } finally {
       if (mounted) setState(() => _speaking = false);
     }
+  }
+
+  /// Zálohy. Číta ich iba vlastník, takže sa načítajú až keď je rola známa.
+  Future<void> _refreshBackups() async {
+    final base = _baseUrl();
+    if (base == null || _accessToken.text.isEmpty) return;
+    try {
+      final api = GenesisApi(baseUrl: base, client: _client);
+      final found = await api.backups(_accessToken.text);
+      if (mounted) {
+        setState(() {
+          _backups = found;
+          _backupsConfigured = true;
+          _backupsError = null;
+        });
+      }
+    } on GenesisUnauthorized {
+      await _accessWasRefused();
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _backups = [];
+          // 503 je nenastavené zálohovanie, nie porucha. Zliať to s chybou by
+          // znamenalo, že prevádzkovateľ hľadá problém tam, kde žiadny nie je.
+          _backupsConfigured = !'$error'.contains('503');
+          _backupsError = _backupsConfigured
+              ? 'Zálohy sa nepodarilo prečítať. Nevieme, či nejaká existuje.'
+              : null;
+        });
+      }
+    }
+  }
+
+  Future<void> _createBackup() async {
+    final base = _baseUrl();
+    if (base == null || _accessToken.text.isEmpty) return;
+    setState(() {
+      _backingUp = true;
+      _backupNotice = null;
+    });
+    try {
+      final api = GenesisApi(baseUrl: base, client: _client);
+      final written = await api.createBackup(_accessToken.text);
+      if (!mounted) return;
+      setState(() => _backupNotice =
+          'Záloha je zapísaná: ${written.size}, ${written.path}.');
+      await _refreshBackups();
+    } on GenesisUnauthorized {
+      await _accessWasRefused();
+    } on GenesisBackupExists {
+      if (mounted) {
+        setState(() => _backupNotice =
+            'Záloha pre tento okamih už existuje a jednotka ju neprepíše. '
+            'Predchádzajúca záloha zostáva neporušená.');
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _backupNotice =
+            'Zálohu sa nepodarilo vytvoriť. Zoznam nižšie hovorí, čo jednotka má.');
+      }
+    } finally {
+      if (mounted) setState(() => _backingUp = false);
+    }
+  }
+
+  /// Otvorené incidenty naprieč grantmi.
+  ///
+  /// Počíta sa z toho, čo panel už má z `GET /v1/access` — nie je na to vlastné
+  /// API a ani ho netreba vyrábať.
+  int get _openIncidents =>
+      _grants.fold(0, (total, grant) => total + grant.openIncidents.length);
+
+  /// Prevádzka: čo beží, čo sa pokazilo a čo je zazálohované.
+  ///
+  /// Päť vecí a päť riadkov. Zliať ich do jedného „stav systému" by zahodilo
+  /// presne tú informáciu, pre ktorú sem prevádzkovateľ chodí: odpovedajúca
+  /// jednotka nič nehovorí o Home Assistantovi, ten nič o incidentoch a žiadny z
+  /// nich nič o tom, či existuje záloha.
+  Widget _operationsSection() {
+    final theme = Theme.of(context);
+    final owner = _principal?.role == 'owner';
+    final link = _diagnostics?.homeAssistant;
+    final (healthLabel, healthColor) = _healthPresentation();
+    final (linkLabel, linkColor) = _linkPresentation(link);
+    final incidents = _openIncidents;
+    final newest = _backups.isEmpty ? null : _backups.first;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const ElysiumSectionLabel('Prevádzka'),
+        const SizedBox(height: 10),
+        Text(
+          'Päť vecí, ktoré sa môžu pokaziť nezávisle od seba, a preto majú päť '
+          'riadkov. Odpovedajúca jednotka nehovorí nič o Home Assistantovi — '
+          '`/health` odpovedá aj vtedy, keď WebSocket sedenie spadlo — ten nič o '
+          'incidentoch a žiadny z nich nič o tom, či existuje záloha.',
+          style: theme.textTheme.bodyMedium,
+        ),
+        const SizedBox(height: 14),
+        ElysiumCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _diagnosticsRow('Genesis jednotka', 'Odpoveď na /health',
+                  healthLabel, healthColor),
+              const SizedBox(height: 14),
+              _diagnosticsRow('Home Assistant', 'WebSocket sedenie',
+                  linkLabel, linkColor),
+              const SizedBox(height: 14),
+              _diagnosticsRow(
+                'Inventár',
+                _inventory == null
+                    ? 'Nenačítaný'
+                    : '${_inventory!.devices.length} zariadení, '
+                        '${_inventory!.areas.length} miestností',
+                _inventoryStatus().$1,
+                _inventoryStatus().$2,
+              ),
+              const SizedBox(height: 14),
+              _diagnosticsRow(
+                'Otvorené incidenty',
+                incidents == 0
+                    ? 'Žiadny grant nečaká na zosúladenie'
+                    : 'Časový prístup, ktorý sa nepodarilo uzavrieť',
+                incidents == 0 ? 'Žiadne' : '$incidents',
+                incidents == 0 ? ElysiumColors.teal : ElysiumColors.danger,
+              ),
+              const SizedBox(height: 14),
+              _diagnosticsRow(
+                'Posledná záloha',
+                _backupDetail(newest),
+                _backupStatus(newest).$1,
+                _backupStatus(newest).$2,
+              ),
+              if (_diagnosticsError != null) ...[
+                const SizedBox(height: 14),
+                Text(_diagnosticsError!, style: theme.textTheme.bodySmall),
+              ],
+              if (link != null) ...[
+                const SizedBox(height: 14),
+                Divider(color: ElysiumColors.of(context).border, height: 1),
+                const SizedBox(height: 14),
+                for (final line in _linkDetails(link, _diagnostics!))
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text(line, style: theme.textTheme.labelMedium),
+                  ),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        if (owner) _backupCard() else _backupNotForYouCard(),
+        const SizedBox(height: 12),
+        _restoreCard(),
+      ],
+    );
+  }
+
+  (String, Color) _inventoryStatus() {
+    final inventory = _inventory;
+    if (inventory == null) return ('Neznámy', ElysiumColors.caution);
+    if (!inventory.isConnected) return ('Zastaraný', ElysiumColors.caution);
+    if (inventory.roomsIncomplete) {
+      return ('Neúplný', ElysiumColors.caution);
+    }
+    return ('Načítaný', ElysiumColors.teal);
+  }
+
+  (String, Color) _backupStatus(GenesisBackup? newest) {
+    if (!_backupsConfigured) return ('Nenastavené', ElysiumColors.electricBlue);
+    if (_backupsError != null) return ('Neznáme', ElysiumColors.caution);
+    if (_principal != null && _principal!.role != 'owner') {
+      return ('Len vlastník', ElysiumColors.electricBlue);
+    }
+    if (newest == null) return ('Žiadna', ElysiumColors.danger);
+    return ('Existuje', ElysiumColors.teal);
+  }
+
+  String _backupDetail(GenesisBackup? newest) {
+    if (!_backupsConfigured) {
+      return 'Jednotka nemá nastavený priečinok pre zálohy';
+    }
+    if (_backupsError != null) return _backupsError!;
+    if (_principal != null && _principal!.role != 'owner') {
+      return 'Zálohy vidí iba vlastník domácnosti';
+    }
+    if (newest == null) return 'Žiadna záloha neexistuje';
+    return newest.at == null
+        ? newest.path
+        : '${_formatMoment(newest.at!.toLocal())} · ${newest.size}';
+  }
+
+  Widget _backupCard() {
+    final theme = Theme.of(context);
+    return ElysiumCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Záloha', style: theme.textTheme.titleMedium),
+          const SizedBox(height: 4),
+          Text(
+            'Celý stav Genesis je jeden SQLite súbor. Záloha je `VACUUM INTO` za '
+            'behu, takže je celá a platná aj keď sa práve zapisuje — na rozdiel '
+            'od skopírovania súboru. Existujúcu zálohu jednotka neprepíše.',
+            style: theme.textTheme.labelMedium,
+          ),
+          const SizedBox(height: 12),
+          if (!_backupsConfigured)
+            Text(
+              'Zálohovanie nie je na jednotke nastavené, takže tlačidlo by '
+              'nemalo kam zapisovať.',
+              style: theme.textTheme.bodyMedium,
+            )
+          else
+            Align(
+              alignment: Alignment.centerLeft,
+              child: FilledButton(
+                onPressed: _backingUp ? null : _createBackup,
+                child: Text(_backingUp ? 'Zapisuje sa…' : 'Vytvoriť zálohu'),
+              ),
+            ),
+          if (_backupNotice != null) ...[
+            const SizedBox(height: 10),
+            Text(_backupNotice!, style: theme.textTheme.bodySmall),
+          ],
+          if (_backups.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Text('Zálohy na jednotke', style: theme.textTheme.labelMedium),
+            for (final item in _backups.take(6))
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  '${item.at == null ? "—" : _formatMoment(item.at!.toLocal())} · '
+                  '${item.size} · ${item.path}',
+                  style: theme.textTheme.labelMedium,
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _backupNotForYouCard() {
+    final theme = Theme.of(context);
+    return ElysiumCard(
+      child: Text(
+        'Zálohu vytvára a vidí iba vlastník domácnosti. Jednotka to odmieta sama '
+        '— panel to tu len nenavrhuje.',
+        style: theme.textTheme.bodyMedium,
+      ),
+    );
+  }
+
+  /// Prečo tu tlačidlo na obnovu nie je.
+  ///
+  /// Nie je to chýbajúca funkcia. Služba si nedokáže bezpečne podsunúť súbor
+  /// sama sebe pod otvoreným spojením, takže „živá obnova" by bola operácia,
+  /// ktorá môže poškodiť presne ten stav, ktorý má zachraňovať. Obnova sa robí
+  /// pri zastavenej službe a podľa runbooku.
+  Widget _restoreCard() {
+    final theme = Theme.of(context);
+    return ElysiumCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Obnova a rollback', style: theme.textTheme.titleMedium),
+          const SizedBox(height: 4),
+          Text(
+            'Obnovu panel nerobí a nebude. Nie je to chýbajúca funkcia: služba si '
+            'nedokáže bezpečne podsunúť databázu sama sebe pod otvoreným '
+            'spojením, takže tlačidlo „obnoviť" by mohlo poškodiť práve ten stav, '
+            'ktorý má zachraňovať.',
+            style: theme.textTheme.bodyMedium,
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Postup sa robí pri zastavenej službe: zastaviť app, odložiť súbor '
+            'ledgeru, nakopírovať zálohu na jeho miesto, spustiť app. Celý '
+            'runbook vrátane aktualizácie a rollbacku je v '
+            'docs/ELYSIUM-348-obnova.md; staršia verzia novšiu databázu odmietne, '
+            'takže rollback nie je len o obraze.',
+            style: theme.textTheme.labelMedium,
+          ),
+        ],
+      ),
+    );
   }
 
   /// Hlasový povel textom.

@@ -259,7 +259,10 @@ fn app(state: AppState) -> Router {
         .route("/v1/pairings", axum::routing::post(create_pairing))
         .route("/v1/pairings/redeem", axum::routing::post(redeem_pairing))
         .route("/v1/credentials", get(list_credentials))
-        .route("/v1/backup", axum::routing::post(create_backup))
+        .route(
+            "/v1/backup",
+            axum::routing::post(create_backup).get(list_backups),
+        )
         .route(
             "/v1/credentials/{credential_id}",
             axum::routing::delete(revoke_credential),
@@ -787,6 +790,30 @@ async fn create_backup(
     })?;
     tracing::info!(path = %written.path, bytes = written.bytes, "backup written");
     Ok((StatusCode::CREATED, Json(written)))
+}
+
+/// Zálohy, ktoré jednotka má, najnovšia prvá.
+///
+/// Vidí to iba vlastník, rovnako ako vytvorenie zálohy: odpoveď nesie cesty v
+/// súborovom systéme jednotky. Tajomstvo v nich nie je — meno je iba čas vzniku
+/// — ale komu patrí záloha, patrí aj jej zoznam.
+///
+/// Prázdny zoznam znamená, že záloha ešte nebola. Nenastavený priečinok je 503,
+/// nie prázdno: to prvé je stav domácnosti, to druhé stav jednotky, a zliať ich
+/// by znamenalo tvrdiť, že zálohovanie funguje a nikto ho nepoužil.
+async fn list_backups(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<backup::Backup>>, StatusCode> {
+    household_owner(&headers, &state).await?;
+    let directory = state
+        .backup_dir
+        .as_deref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    backup::list(directory).map(Json).map_err(|error| {
+        tracing::error!(%error, "reading the backup listing failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
 }
 
 /// Vlastník domácnosti. Párovanie ani odobranie prístupu nie je nič, čo by mal
@@ -2292,6 +2319,60 @@ mod tests {
         assert!(written["bytes"].as_u64().unwrap() > 0);
         // Záloha nie je len súbor — je to databáza, ktorú sa dá otvoriť.
         assert!(Ledger::open(written["path"].as_str().unwrap()).is_ok());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Prehľad záloh má tú istú rolu ako ich vytvorenie, a prázdny zoznam sa
+    /// nesmie zliať s nenastaveným priečinkom.
+    #[tokio::test]
+    async fn the_backup_listing_is_owner_only_and_newest_first() {
+        let mut state = test_state(Some("r".repeat(32)));
+        state.write_token = Some("o".repeat(32));
+        state.member_token = Some("m".repeat(32));
+        state.guest_token = Some("g".repeat(32));
+        let owner = "o".repeat(32);
+
+        assert_eq!(
+            call(state.clone(), "GET", "/v1/backup", None, None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        for token in ["m".repeat(32), "g".repeat(32), "r".repeat(32)] {
+            assert_eq!(
+                call(state.clone(), "GET", "/v1/backup", Some(&token), None)
+                    .await
+                    .0,
+                StatusCode::FORBIDDEN,
+                "token {token} saw the backups"
+            );
+        }
+        // Nenastavený priečinok je 503. Prázdne pole by tvrdilo, že zálohovanie
+        // funguje a nikto ho nepoužil.
+        assert_eq!(
+            call(state.clone(), "GET", "/v1/backup", Some(&owner), None)
+                .await
+                .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        let directory =
+            std::env::temp_dir().join(format!("genesis-api-backups-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        state.backup_dir = Some(Arc::new(directory.clone()));
+
+        // Nastavený priečinok bez zálohy je prázdny zoznam, nie chyba.
+        let (status, listed) = call(state.clone(), "GET", "/v1/backup", Some(&owner), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed, serde_json::json!([]));
+
+        call(state.clone(), "POST", "/v1/backup", Some(&owner), None).await;
+        let (status, listed) = call(state, "GET", "/v1/backup", Some(&owner), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = listed.as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0]["bytes"].as_u64().unwrap() > 0);
+        assert!(rows[0]["at"].as_str().unwrap().ends_with('Z'));
+        // V odpovedi nie je žiaden token, hoci cesta v nej je.
+        assert!(!listed.to_string().contains(&owner));
         std::fs::remove_dir_all(directory).unwrap();
     }
 
