@@ -86,6 +86,7 @@ Doteraz vydané:
 | `0.1.2` | `sha256:1ef49e43…` | Ingress, panel v pôvodnom Material vzhľade |
 | `0.1.3` | `sha256:1e049fc2…` | panel v Elysium dizajne |
 | `0.1.4` | `sha256:97502fb4…` | ELYSIUM-353–357 a zapnutie zálohy, citlivých zariadení a Behavior kanála v app |
+| `0.1.5` | doplní sa po publikovaní | ELYSIUM-358–360: hlas v paneli, prevádzkové centrum, verzovaný iOS projekt |
 
 Digest sa dá doplniť až po publikovaní: obraz vzniká pri pushi do `main`, takže v čase, keď sa `version` zvyšuje, ešte neexistuje. Riadok je preto záznam o tom, čo bolo vydané, nie plán.
 

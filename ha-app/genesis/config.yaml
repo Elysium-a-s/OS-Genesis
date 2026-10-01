@@ -1,6 +1,6 @@
 name: OS Genesis Pilot
 slug: genesis_pilot
-version: "0.1.4"
+version: "0.1.5"
 description: Pilotná centrálna služba Genesis pre Home Assistant Green
 url: https://github.com/Elysium-a-s/OS-Genesis
 arch:
