@@ -51,6 +51,23 @@ jobs:
         with:
           channel: stable
           cache: true
-      - run: flutter create --platforms=ios --org com.elysium.genesis .
+      # Žiadne `flutter create`: iOS projekt je od ELYSIUM-360 verzovaný, takže
+      # generovanie by prepísalo Info.plist aj bundle identifier — a výnimka pre
+      # App Transport Security by zmizla bez toho, aby to niečo zahlásilo.
       - run: flutter pub get
       - run: flutter build ios --simulator --no-codesign
+      # Overí, že sa v zostavenej aplikácii naozaj nachádza to, čo plist tvrdí.
+      # `flutter test` kontroluje zdroj; toto kontroluje výsledok.
+      - name: Check the built app carries the local-network exception
+        run: |
+          set -euo pipefail
+          plist=build/ios/iphonesimulator/Runner.app/Info.plist
+          test -f "$plist"
+          /usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity:NSAllowsLocalNetworking' "$plist"
+          /usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = com.elysium.genesis.panel
+          # Blanket výnimka by vypla TLS pre celú aplikáciu.
+          if /usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity:NSAllowsArbitraryLoads' "$plist" 2>/dev/null; then
+            echo "NSAllowsArbitraryLoads sa dostalo do buildu; výnimka má zostať na lokálnu sieť"
+            exit 1
+          fi

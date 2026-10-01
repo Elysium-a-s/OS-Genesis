@@ -142,6 +142,12 @@ Future<void> _press(WidgetTester tester, Finder target) async {
 }
 
 Future<void> _signIn(WidgetTester tester, String token) async {
+  // Nainštalovaná aplikácia sa otvorí bez adresy, takže ju zadá človek —
+  // test to robí rovnako ako používateľ na iPade.
+  await tester.enterText(
+    find.widgetWithText(TextField, 'Adresa Genesis API'),
+    'http://green.local:8080',
+  );
   await tester.enterText(
     find.widgetWithText(TextField, 'Prístupový token'),
     token,
@@ -161,6 +167,17 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(GenesisApp(client: client, tokenStore: store));
+    await _settle(tester);
+    // Aj uplatnenie kódu potrebuje adresu jednotky: nainštalovaná aplikácia sa
+    // otvorí bez nej a člen s kódom sa tiež musí dozvedieť, kde jednotka je.
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Adresa Genesis API'),
+      'http://green.local:8080',
+    );
+    // Uložený token sa obnovuje pri štarte, teda skôr než adresa existuje, a
+    // vtedy sa nič nepokúša — rovnako ako na zariadení. Až vlastný pätnásťsekundový
+    // cyklus panelu ho použije, a až tam sa ukáže, že ho jednotka odmieta.
+    await tester.pump(const Duration(seconds: 15));
     await _settle(tester);
   }
 

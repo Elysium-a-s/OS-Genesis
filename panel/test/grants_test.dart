@@ -138,6 +138,12 @@ MockClient _unit({
     });
 
 Future<void> _signIn(WidgetTester tester, String token) async {
+  // Nainštalovaná aplikácia sa otvorí bez adresy, takže ju zadá človek —
+  // test to robí rovnako ako používateľ na iPade.
+  await tester.enterText(
+    find.widgetWithText(TextField, 'Adresa Genesis API'),
+    'http://green.local:8080',
+  );
   await tester.enterText(
     find.widgetWithText(TextField, 'Prístupový token'),
     token,

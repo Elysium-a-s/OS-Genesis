@@ -146,6 +146,12 @@ void main() {
     });
 
     await tester.pumpWidget(GenesisApp(client: client));
+    // Nainštalovaná aplikácia sa otvorí bez adresy, takže ju zadá človek —
+    // test to robí rovnako ako používateľ na iPade.
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Adresa Genesis API'),
+      'http://green.local:8080',
+    );
     await tester.enterText(find.widgetWithText(TextField, 'Prístupový token'), 'a' * 32);
     // Panel číta sám dokola; pätnásta sekunda je jeho vlastný cyklus, takže
     // test nemusí siahať na tlačidlo mimo obrazovky.
@@ -241,6 +247,12 @@ void main() {
     });
 
     await tester.pumpWidget(GenesisApp(client: client));
+    // Nainštalovaná aplikácia sa otvorí bez adresy, takže ju zadá človek —
+    // test to robí rovnako ako používateľ na iPade.
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Adresa Genesis API'),
+      'http://green.local:8080',
+    );
     await tester.enterText(find.widgetWithText(TextField, 'Prístupový token'), 'b' * 32);
     await tester.pump(const Duration(seconds: 15));
     await _settle(tester);

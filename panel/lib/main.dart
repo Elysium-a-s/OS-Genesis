@@ -10,10 +10,20 @@ import 'token_store.dart';
 
 void main() => runApp(const GenesisApp());
 
+/// Adresa Genesis API, s ktorou sa panel otvorí.
+///
+/// Vo webe je to pôvod otvorenej stránky: panel sa podáva cez Home Assistant
+/// Ingress, takže API je na tej istej adrese a hádať netreba nič.
+///
+/// V nainštalovanej aplikácii je to **prázdne**, kým to niekto nenastaví cez
+/// `--dart-define=GENESIS_API_URL=...`. Predtým tu bolo `http://localhost:8765`,
+/// čo je na iPade sám iPad — testovacia adresa zabudnutá v produkčnom builde.
+/// Aplikácia naozaj nevie, kde jednotka je, a jediná poctivá odpoveď je spýtať
+/// sa; vymyslená adresa by len vyrobila spojenie, ktoré nikdy nenastane.
 String genesisDefaultApiUrl() {
   const configured = String.fromEnvironment('GENESIS_API_URL');
   if (configured.isNotEmpty) return configured;
-  return kIsWeb ? Uri.base.resolve('.').toString() : 'http://localhost:8765';
+  return kIsWeb ? Uri.base.resolve('.').toString() : '';
 }
 
 class GenesisApp extends StatelessWidget {

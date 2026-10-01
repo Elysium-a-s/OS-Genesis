@@ -144,7 +144,9 @@ Stav jednotky a stav prepojenia Genesis↔Home Assistant sú v sekcii **Prevádz
 Vyžaduje Flutter SDK a pre iPadOS build Xcode na macOS. V adresári `panel/`:
 
 ```sh
-flutter create --platforms=ios,web --org com.elysium.genesis .
+# iOS projekt je verzovaný (ELYSIUM-360) — negenerujte ho, prepísali by ste
+# Info.plist, bundle identifier aj výnimku pre App Transport Security.
+flutter create --platforms=web --org com.elysium.genesis .
 flutter pub get
 flutter run -d chrome --dart-define=GENESIS_API_URL=http://localhost:8765
 flutter build web --release
@@ -154,6 +156,18 @@ flutter build ios --simulator --no-codesign
 Odpovede sa dekódujú výslovne ako UTF-8 z `bodyBytes`, nie cez `response.body`: axum posiela `application/json` bez parametra `charset` a `package:http` bez neho padá na Latin-1, čo by zo slovenských názvov miestností a zariadení urobilo nečitateľnú zmes.
 
 Webový panel v Home Assistant app verzie `0.1.2` sa otvára cez HA Ingress a automaticky použije rovnakú adresu pre API. Na iPade ako samostatnej natívnej aplikácii treba adresu Genesis API určiť podľa plánovaného spôsobu bezpečného prístupu; port 8765 sa v HA app už nepublikuje. Stav **Online** znamená úspešné volanie health endpointu, nepotvrdzuje HA inventár ani fyzické zariadenia. Prístupový token sa drží iba v pamäti otvoreného panelu a zobrazuje sa ako heslo. Panel nevydáva `provider_confirmed` za zmenu fyzického zariadenia; neistý výsledok označí `unknown`. Prepínač sa deaktivuje pri nedostupnom HA spojení, neznámom stave a tiež vtedy, keď posledný povel na tom zariadení skončil neisto. HA `last_updated` je čas poslednej zmeny zariadenia, nie lehota platnosti stavu; panel ho zobrazuje iba ako informáciu. Povel naslepo znova neodosielajte — panel to pri neistom výsledku ani neponúkne a namiesto toho ponúka prečítanie stavu z ledgeru.
+
+## Nainštalovaná aplikácia na iPade a iPhone
+
+Bundle identifier je `com.elysium.genesis.panel`, minimálny systém iOS/iPadOS 15.0, flavor žiadny. Celé rozhodnutie vrátane postupu podpisu a TestFlightu je v [docs/ELYSIUM-360-ios-aplikacia.md](../docs/ELYSIUM-360-ios-aplikacia.md).
+
+**Aplikácia sa otvorí bez adresy jednotky.** Na zariadení `genesisDefaultApiUrl()` vracia prázdno — predtým vracalo `http://localhost:8765`, čo je na iPade sám iPad. Aplikácia naozaj nevie, kde jednotka je, a vymyslená adresa by len vyrobila spojenie, ktoré nikdy nenastane. Pri vývoji sa dá predvyplniť cez `--dart-define=GENESIS_API_URL=...`.
+
+**Bez výnimky pre App Transport Security by aplikácia jednotku nedosiahla vôbec.** Jednotka hovorí HTTP na privátnej adrese a iOS nezabezpečené spojenia blokuje. V `Info.plist` je preto `NSAllowsLocalNetworking` — povolí HTTP len na lokálnu sieť a TLS pre všetko ostatné zostáva vynútené. `NSAllowsArbitraryLoads` tam **nie je** zámerne: vypol by ATS pre celú aplikáciu, teda aj pre čokoľvek z internetu. Test to tvrdí o `<key>` elemente a CI to po builde overuje aj na zostavenom `Info.plist`.
+
+Od iOS 14 treba aj `NSLocalNetworkUsageDescription`, inak systém prístup do lokálnej siete odmietne a používateľ nemá čo povoliť.
+
+**Podpísaný build ani overenie na fyzickom zariadení v tomto repozitári nie sú.** Prvé potrebuje Apple účet vlastníka, druhé patrí do ELYSIUM-350. Simulátor v CI nie je iPad.
 
 Webový build potrebuje rovnaký pôvod ako API alebo reverzný proxy, ktorý rieši CORS a bezpečné HTTPS. Priame načítanie z inej webovej domény nie je v tejto etape podporované. Fyzický iPad, reálny webový prehliadač s proxy a Smart Bulb treba otestovať pri záverečnom pilotnom nasadení.
 
