@@ -70,6 +70,7 @@ MockClient _client() => MockClient((request) async {
       if (path.endsWith('/v1/inventory')) {
         return _ok(_household(), 200);
       }
+      if (path.endsWith('/v1/access')) return _ok('[]', 200);
       if (path.endsWith('/v1/diagnostics')) {
         return _ok(
             jsonEncode({

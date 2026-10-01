@@ -169,6 +169,11 @@ impl GrantState {
     fn open() -> [Self; 3] {
         [Self::Granted, Self::Active, Self::RelockPending]
     }
+
+    /// Či v tomto stave môže byť zariadenie stále otvorené.
+    pub fn is_open(self) -> bool {
+        Self::open().contains(&self)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -436,6 +441,25 @@ pub fn due(ledger: &Ledger, now: DateTime<Utc>) -> Result<Vec<Grant>, GrantError
 /// Granty, ktorých relock skončil neisto a čakajú na zosúladenie.
 pub fn pending(ledger: &Ledger) -> Result<Vec<Grant>, GrantError> {
     by_state(ledger, GrantState::RelockPending)
+}
+
+/// Či by tento grant periodický prechod v tomto okamihu vybral.
+///
+/// Vyžiadané zosúladenie sa opiera o tú istú podmienku ako `due` a `pending`,
+/// takže nedokáže uzavrieť prístup, ktorý ešte platí. Skrátiť platné okno nie je
+/// zosúladenie — je to odobranie prístupu a to má vlastné rozhodnutie
+/// (`revert`), vlastný audit a vlastnú autorizáciu.
+///
+/// Porovnanie času je zámerne to isté reťazcové porovnanie, aké robí `due` v
+/// SQLite; obe strany tak nemôžu o splatnosti povedať nič odlišné.
+pub fn is_reconcilable(grant: &Grant, now: DateTime<Utc>) -> bool {
+    match grant.state {
+        // Unlock bez zapísaného výsledku. Prechod ho preberá bez ohľadu na
+        // expiráciu: nevieme, či sa vykonal, a to treba dopovedať.
+        GrantState::Granted | GrantState::RelockPending => true,
+        GrantState::Active => grant.expires_at.as_str() <= stamp(now).as_str(),
+        GrantState::Relocked | GrantState::UnlockFailed | GrantState::Superseded => false,
+    }
 }
 
 /// Prijme povel, ktorý grant uzatvára.
@@ -1944,5 +1968,73 @@ mod tests {
         assert_eq!(close_attempts(&ledger, "old").unwrap(), 1);
         drop(ledger);
         std::fs::remove_file(path).unwrap();
+    }
+    /// Čo vyžiadané zosúladenie vôbec smie vybrať.
+    ///
+    /// Tabuľka je napísaná stavmi, nie priebehom, práve preto, že pridaný stav
+    /// musí niekto vedome zaradiť do jednej z dvoch skupín. Zabudnutý stav by
+    /// inak mlčky spadol do tej, ktorá zasahuje do zariadenia.
+    #[test]
+    fn only_what_the_scheduled_pass_would_pick_is_reconcilable() {
+        let now = at("2026-09-29T19:30:00Z");
+        let sample = |state: GrantState, expires_at: &str| Grant {
+            decision_id: "ff77bdb0-70af-4f2a-a913-76609b66761b".into(),
+            household_id: "pilot-home".into(),
+            device_id: "ha:light.living".into(),
+            capability_id: "power".into(),
+            granted_value: true,
+            expires_at: expires_at.into(),
+            state,
+            unlock_confirmed: true,
+            unlock_command_id: "behavior:ff77bdb0".into(),
+            relock_command_id: None,
+            updated_at: stamp(now),
+        };
+
+        // Prístup môže byť otvorený a výsledok nie je dopovedaný.
+        assert!(is_reconcilable(
+            &sample(GrantState::Granted, "2026-09-30T19:00:00Z"),
+            now
+        ));
+        assert!(is_reconcilable(
+            &sample(GrantState::RelockPending, "2026-09-30T19:00:00Z"),
+            now
+        ));
+
+        // Otvorený prístup, ktorý ešte platí, sa nezatvára.
+        assert!(!is_reconcilable(
+            &sample(GrantState::Active, "2026-09-29T20:00:00Z"),
+            now
+        ));
+        assert!(is_reconcilable(
+            &sample(GrantState::Active, "2026-09-29T19:00:00Z"),
+            now
+        ));
+        // Hranica: okno končí presne teraz a grant už je splatný, rovnako ako
+        // ho vyberie `due`.
+        assert!(is_reconcilable(
+            &sample(GrantState::Active, &stamp(now)),
+            now
+        ));
+
+        // Uzavreté stavy nemajú čo zosúlaďovať.
+        for state in [
+            GrantState::Relocked,
+            GrantState::UnlockFailed,
+            GrantState::Superseded,
+        ] {
+            assert!(
+                !is_reconcilable(&sample(state, "2026-09-29T19:00:00Z"), now),
+                "{state:?} should not be reconcilable"
+            );
+            assert!(!state.is_open(), "{state:?} should not count as open");
+        }
+        for state in [
+            GrantState::Granted,
+            GrantState::Active,
+            GrantState::RelockPending,
+        ] {
+            assert!(state.is_open(), "{state:?} should count as open");
+        }
     }
 }

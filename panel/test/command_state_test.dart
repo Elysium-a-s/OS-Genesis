@@ -123,6 +123,7 @@ void main() {
             ),
             200);
       }
+      if (path.endsWith('/v1/access')) return _ok('[]', 200);
       if (path.endsWith('/v1/diagnostics')) {
         return _ok(_diagnostics('connected'), 200);
       }
@@ -154,6 +155,7 @@ void main() {
     expect(before.onChanged, isNotNull);
 
     await tester.ensureVisible(find.byType(Switch));
+    await _settle(tester);
     await tester.tap(find.byType(Switch));
     await _settle(tester);
 
@@ -178,6 +180,7 @@ void main() {
     // nepošle nič.
     expect(tester.widget<Switch>(find.byType(Switch)).onChanged, isNull);
     await tester.ensureVisible(find.byType(Switch));
+    await _settle(tester);
     await tester.tap(find.byType(Switch));
     await _settle(tester);
     expect(issued, 1);
@@ -185,6 +188,7 @@ void main() {
     // Ponúka sa jediná bezpečná akcia — prečítať stav znova.
     expect(find.text('Obnoviť stav'), findsOneWidget);
     await tester.ensureVisible(find.text('Obnoviť stav'));
+    await _settle(tester);
     await tester.tap(find.text('Obnoviť stav'));
     await _settle(tester);
     expect(detailReads, 1);
@@ -223,6 +227,7 @@ void main() {
             ),
             200);
       }
+      if (path.endsWith('/v1/access')) return _ok('[]', 200);
       if (path.endsWith('/v1/diagnostics')) {
         return _ok(
             _diagnostics('disconnected', lastError: 'authentication'), 200);

@@ -89,6 +89,14 @@ class _GenesisHomeState extends State<GenesisHome> {
   String? _accessError;
   String? _accessNotice;
   bool _busyWithAccess = false;
+  List<GenesisGrant> _grants = [];
+  String? _grantsError;
+
+  /// Grant, nad ktorým práve beží vyžiadané zosúladenie. Druhé stlačenie by
+  /// nespôsobilo druhý povel — jednotka to nepustí — ale tlačidlo, ktoré
+  /// nereaguje, vyzerá rozbito.
+  String? _reconciling;
+  String? _reconcileNotice;
 
   @override
   void initState() {
@@ -124,6 +132,9 @@ class _GenesisHomeState extends State<GenesisHome> {
       _diagnostics = null;
       _credentials = [];
       _commands = [];
+      _grants = [];
+      _grantsError = null;
+      _reconcileNotice = null;
       _accessToken.clear();
       _accessNotice =
           'Prístup bol odobraný alebo vypršal. Požiadaj vlastníka o nový párovací kód.';
@@ -289,7 +300,91 @@ class _GenesisHomeState extends State<GenesisHome> {
         });
       }
     }
+    await _refreshAccess(api);
   }
+
+  /// Časové prístupy. Číta to každá rola — kto v domácnosti žije, má vedieť, že
+  /// sa mu niečo zamyká samo.
+  Future<void> _refreshAccess(GenesisApi api) async {
+    try {
+      final grants = await api.access(_accessToken.text);
+      if (mounted) {
+        setState(() {
+          _grants = grants;
+          _grantsError = null;
+        });
+      }
+    } on GenesisUnauthorized {
+      await _accessWasRefused();
+    } catch (_) {
+      // Prázdny zoznam by tvrdil, že žiadny časový prístup nie je otvorený.
+      // Nevieme to — a práve tu by to bola tá najhoršia nepravda.
+      if (mounted) {
+        setState(() {
+          _grants = [];
+          _grantsError =
+              'Časové prístupy sa nepodarilo prečítať. Nevieme, či je niektorý otvorený.';
+        });
+      }
+    }
+  }
+
+  /// Vyžiada zosúladenie jedného grantu.
+  ///
+  /// Jednotka týmto nedokáže nič otvoriť ani predĺžiť a platné okno neskráti.
+  /// Stav sa prekreslí z odpovede, nie z domnienky o tom, čo stlačenie spôsobilo.
+  Future<void> _reconcile(GenesisGrant grant) async {
+    final base = _baseUrl();
+    if (base == null || _accessToken.text.isEmpty) return;
+    setState(() {
+      _reconciling = grant.decisionId;
+      _reconcileNotice = null;
+    });
+    try {
+      final api = GenesisApi(baseUrl: base, client: _client);
+      final receipt = await api.reconcileAccess(
+        ownerToken: _accessToken.text,
+        decisionId: grant.decisionId,
+      );
+      if (!mounted) return;
+      setState(() {
+        _grants = [
+          for (final existing in _grants)
+            if (existing.decisionId == receipt.grant.decisionId)
+              receipt.grant
+            else
+              existing,
+        ];
+        _reconcileNotice = _reconcileOutcomeText(receipt);
+      });
+    } on GenesisUnauthorized {
+      await _accessWasRefused();
+    } catch (_) {
+      if (mounted) {
+        setState(() => _reconcileNotice =
+            'Zosúladenie sa nepodarilo vyžiadať. Stav grantu sa nezmenil.');
+      }
+    } finally {
+      if (mounted) setState(() => _reconciling = null);
+    }
+  }
+
+  /// Čo sa stalo, vetou. `settled` a `attempted` sa nezlievajú: prvé znamená
+  /// dokázateľne zatvorený prístup, druhé že sa o to Genesis pokúsil a dôkaz
+  /// nemá. Zliať ich by znamenalo tvrdiť o fyzickom svete niečo, čo nikto
+  /// nepotvrdil.
+  String _reconcileOutcomeText(GenesisReconcileReceipt receipt) =>
+      switch (receipt.outcome) {
+        'settled' => 'Prístup je zatvorený a potvrdený.',
+        'attempted' =>
+          'Uzavretie je zapísané, ale zariadenie ho nepotvrdilo. Incident zostáva otvorený.',
+        'unchanged' =>
+          'Nič sa nezmenilo: zariadenie je nedostupné alebo sa čaká na ďalší pokus.',
+        'not_due' =>
+          'Okno tohto prístupu ešte platí, takže sa nezatvára. Odobrať prístup skôr nie je zosúladenie.',
+        'not_open' => 'Tento prístup už nie je otvorený.',
+        _ => 'Jednotka odpovedala stavom, ktorý panel nepozná.',
+      };
 
   /// Znovu prečíta stav povelu. Je to čítanie z ledgeru, nie druhé odoslanie —
   /// pri neistom výsledku je to jediná akcia, ktorá sa smie ponúknuť.
@@ -475,6 +570,8 @@ class _GenesisHomeState extends State<GenesisHome> {
                   _devicesSection(),
                   const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
                   _diagnosticsSection(),
+                  const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
+                  _grantsSection(),
                   const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
                   _accessSection(),
                   const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
@@ -712,6 +809,231 @@ class _GenesisHomeState extends State<GenesisHome> {
         ElysiumStatusPill(label: label, color: color),
       ],
     );
+  }
+
+  /// Časový prístup: čo Behavior otvorilo a čo sa z toho vrátilo späť.
+  ///
+  /// Sekcia je postavená na jednom rozlíšení: **logická evidencia na jednotke
+  /// nie je stav zariadenia.** Grant môže byť „relocked" a žiarovka svietiť,
+  /// alebo „relock_pending" a byť dávno zhasnutá. Preto má každý grant dva
+  /// samostatné riadky a panel ich nikdy nezlieva do jedinej vety.
+  Widget _grantsSection() {
+    final theme = Theme.of(context);
+    final now = DateTime.now();
+    final open = _grants.where((grant) => grant.isOpen).toList();
+    final closed = _grants.where((grant) => !grant.isOpen).toList();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const ElysiumSectionLabel('Časový prístup'),
+        const SizedBox(height: 10),
+        Text(
+          'Prístup, ktorý Behavior otvoril na čas. Evidencia na jednotke a stav '
+          'zariadenia sú dve rôzne veci, takže sa tu píšu oddelene: jeden riadok '
+          'hovorí, čo si jednotka pamätá, druhý, čo naozaj niekto potvrdil.',
+          style: theme.textTheme.bodyMedium,
+        ),
+        const SizedBox(height: 14),
+        if (_grantsError != null)
+          ElysiumCard(
+            child: Text(_grantsError!, style: theme.textTheme.bodyMedium),
+          )
+        else if (_accessToken.text.isEmpty)
+          ElysiumCard(
+            child: Text(
+              'Bez prístupového tokenu sa časové prístupy nečítajú.',
+              style: theme.textTheme.bodyMedium,
+            ),
+          )
+        else if (_grants.isEmpty)
+          ElysiumCard(
+            child: Text(
+              'Žiadny časový prístup nie je otvorený ani nedovrený.',
+              style: theme.textTheme.bodyMedium,
+            ),
+          )
+        else ...[
+          for (final grant in [...open, ...closed]) ...[
+            _grantCard(grant, now),
+            const SizedBox(height: 12),
+          ],
+          if (_reconcileNotice != null)
+            Text(_reconcileNotice!, style: theme.textTheme.bodySmall),
+        ],
+      ],
+    );
+  }
+
+  Widget _grantCard(GenesisGrant grant, DateTime now) {
+    final theme = Theme.of(context);
+    final colors = ElysiumColors.of(context);
+    final (stateLabel, stateColor) = _grantPresentation(grant, now);
+    final owner = _principal?.role == 'owner';
+    final busy = _reconciling == grant.decisionId;
+    final actionable = grant.isReconcilable(now);
+    return ElysiumCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(_grantDeviceLabel(grant), style: theme.textTheme.titleMedium),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Otvorené na ${grant.grantedValue ? "zapnuté" : "vypnuté"}'
+                      ' · ${grant.capabilityId}',
+                      style: theme.textTheme.labelMedium,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              ElysiumStatusPill(label: stateLabel, color: stateColor),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Divider(color: colors.border, height: 1),
+          const SizedBox(height: 14),
+          _grantFact('Evidencia jednotky', _grantLedgerText(grant, now)),
+          const SizedBox(height: 10),
+          _grantFact('Fyzické potvrdenie', _grantConfirmedText(grant)),
+          if (grant.openIncidents.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            for (final incident in grant.openIncidents)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Text(
+                  'Otvorený incident (${incident.kind}): ${incident.detail}',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: ElysiumColors.caution),
+                ),
+              ),
+            Text(
+              'Pokusy o uzavretie: ${grant.closeAttempts}',
+              style: theme.textTheme.labelMedium,
+            ),
+          ],
+          const SizedBox(height: 14),
+          if (owner)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton(
+                onPressed: actionable && !busy ? () => _reconcile(grant) : null,
+                child: Text(busy ? 'Zosúlaďuje sa…' : 'Zosúladiť teraz'),
+              ),
+            )
+          else
+            Text(
+              'Zosúladenie môže vyžiadať iba vlastník.',
+              style: theme.textTheme.labelMedium,
+            ),
+          if (owner && !actionable) ...[
+            const SizedBox(height: 6),
+            Text(
+              grant.isOpen
+                  ? 'Okno ešte platí. Zatvoriť prístup skôr nie je zosúladenie — '
+                      'to je odobranie prístupu a má vlastné rozhodnutie.'
+                  : 'Tento prístup je uzavretý, takže nie je čo zosúlaďovať.',
+              style: theme.textTheme.labelMedium,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _grantFact(String title, String detail) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: theme.textTheme.labelMedium),
+        const SizedBox(height: 2),
+        Text(detail, style: theme.textTheme.bodyMedium),
+      ],
+    );
+  }
+
+  /// Názov zariadenia z inventára, keď ho panel má.
+  ///
+  /// Keď nie, zobrazí sa identifikátor. Vymyslieť názov by znamenalo tvrdiť o
+  /// domácnosti niečo, čo z odpovede neplynie — a zariadenie, ktoré z Home
+  /// Assistanta zmizlo, je presne ten prípad, kde to človeka zmätie najviac.
+  String _grantDeviceLabel(GenesisGrant grant) {
+    final device = _inventory?.devices
+        .where((candidate) => candidate.id == grant.deviceId)
+        .firstOrNull;
+    return device?.name ?? grant.deviceId;
+  }
+
+  /// Logický stav grantu, slovom. Je to evidencia jednotky, nie stav zariadenia.
+  (String, Color) _grantPresentation(GenesisGrant grant, DateTime now) =>
+      switch (grant.state) {
+        'granted' => ('Bez výsledku', ElysiumColors.caution),
+        'active' when grant.expiredAt(now) =>
+          ('Po expirácii', ElysiumColors.caution),
+        'active' => ('Otvorený', ElysiumColors.teal),
+        'relock_pending' => ('Neistý návrat', ElysiumColors.danger),
+        'relocked' => ('Vrátený', ElysiumColors.teal),
+        'unlock_failed' => ('Nevykonaný', ElysiumColors.electricBlue),
+        'superseded' => ('Nahradený', ElysiumColors.electricBlue),
+        // Stav, ktorý panel nepozná, sa nikdy nezobrazí ako úspech.
+        _ => ('Neznámy stav', ElysiumColors.caution),
+      };
+
+  String _grantLedgerText(GenesisGrant grant, DateTime now) {
+    final window = grant.expiresAt == null
+        ? 'bez známeho konca okna'
+        : grant.expiredAt(now)
+            ? 'okno uplynulo ${_formatMoment(grant.expiresAt!.toLocal())}'
+            : 'platí do ${_formatMoment(grant.expiresAt!.toLocal())}';
+    return switch (grant.state) {
+      'granted' =>
+        'Unlock je prijatý, výsledok sa nezapísal — $window. Po reštarte to '
+            'jednotka preberá sama.',
+      'active' when grant.unlockConfirmed => 'Prístup je otvorený, $window.',
+      'active' =>
+        'Prístup je evidovaný ako otvorený, ale unlock nedosiahol vyžadované '
+            'potvrdenie ($window).',
+      'relock_pending' =>
+        'Uzavretie je zapísané a potvrdenie nedošlo, $window.',
+      'relocked' => 'Prístup je vrátený späť, $window.',
+      'unlock_failed' => 'Unlock sa nevykonal, nie je čo vracať.',
+      'superseded' =>
+        'To isté zariadenie drží na rovnakej hodnote novšie rozhodnutie.',
+      _ => 'Stav „${grant.state}" panel nepozná ($window).',
+    };
+  }
+
+  /// Čo o fyzickom svete naozaj vieme.
+  ///
+  /// `provider` a `device` sa nezlievajú: iba druhé hovorí o zariadení. Prvé
+  /// znamená, že potvrdil Home Assistant — čo je o jeden krok ďalej od
+  /// žiarovky, než sa zdá.
+  String _grantConfirmedText(GenesisGrant grant) {
+    final confirmed = grant.lastConfirmed;
+    if (confirmed == null) {
+      return 'Žiadne potvrdenie. Fyzický stav zariadenia nie je známy.';
+    }
+    final value = switch (confirmed.value) {
+      true => 'zapnuté',
+      false => 'vypnuté',
+      final other => '$other',
+    };
+    final who = confirmed.isDeviceConfirmed
+        ? 'Zariadenie potvrdilo'
+        : 'Potvrdil poskytovateľ (nie zariadenie):';
+    final at = confirmed.observedAt ?? confirmed.at;
+    final when = at == null ? '' : ' · ${_formatMoment(at.toLocal())}';
+    final required = confirmed.isDeviceConfirmed ||
+            grant.requiredConfirmation != 'device'
+        ? ''
+        : ' Rozhodnutie vyžadovalo potvrdenie zariadením.';
+    return '$who $value$when.$required';
   }
 
   /// Vydané identity domácnosti. Vidí ich iba vlastník, takže sa načítajú až

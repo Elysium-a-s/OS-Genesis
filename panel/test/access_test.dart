@@ -123,6 +123,7 @@ MockClient _unit({
             : _principal('member', 'ivan'));
       }
       if (path.endsWith('/v1/inventory')) return _ok(_inventory());
+      if (path.endsWith('/v1/access')) return _ok('[]', 200);
       if (path.endsWith('/v1/diagnostics')) return _ok(_diagnostics());
       if (path.endsWith('/v1/commands')) return _ok('[]');
       return _ok('{}', 404);

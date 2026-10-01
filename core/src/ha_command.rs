@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
 use serde_json::{json, Value};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -384,6 +385,86 @@ pub async fn reconcile(
         }
     }
     Ok(settled)
+}
+
+/// Čo urobil jeden vyžiadaný prechod nad jedným grantom.
+///
+/// `Settled` a `Attempted` sa zámerne nezlievajú do jedného „uspelo": prvé
+/// znamená, že prístup je dokázateľne zatvorený, druhé že sa o to Genesis
+/// pokúsil a potvrdenie nemá. To je rozdiel medzi logickým stavom a fyzickým
+/// svetom a je to presne to, čo sa nesmie stratiť po ceste do panelu.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconcileOutcome {
+    /// Grant dosiahol koncový stav: prístup je zatvorený.
+    Settled,
+    /// Uzavretie je zapísané, ale potvrdenie, ktoré rozhodnutie vyžadovalo,
+    /// nedošlo. Grant zostáva `relock_pending` a incident otvorený.
+    Attempted,
+    /// Nič sa nepohnulo: čaká sa na ďalší pokus, zariadenie nie je dostupné
+    /// alebo je limit pokusov vyčerpaný. Incident zostáva otvorený.
+    Unchanged,
+    /// Grant už nie je otvorený, takže nie je čo zosúlaďovať.
+    NotOpen,
+    /// Okno grantu ešte platí. Periodický prechod by ho tiež nevybral.
+    NotDue,
+}
+
+/// Zosúladenie jedného grantu, vyžiadané človekom.
+///
+/// Je to tá istá cesta ako v periodickom prechode, len s jedným grantom —
+/// zámerne, aby vyžiadané zosúladenie nedokázalo nič, čo plánované nerobí. Z
+/// toho plynú tri vlastnosti, na ktoré sa dá spoliehať:
+///
+/// * **Posiela sa výlučne uzatváracia hodnota.** `close_grant` berie hodnotu z
+///   `Grant::closing_value()`, takže týmto volaním sa prístup nedá otvoriť ani
+///   predĺžiť, nech ho vyvolá kto chce.
+/// * **Platné okno sa neskracuje.** `grant::is_reconcilable` pustí ďalej len to,
+///   čo by prechod vybral sám; inak vráti `NotDue`.
+/// * **Limit pokusov ani backoff sa neobchádza.** Opakované stláčanie skončí na
+///   `may_attempt` a vráti `Unchanged`; zariadenie tým nikto nezaplaví.
+///
+/// `None` znamená, že taký grant neexistuje.
+pub async fn reconcile_grant(
+    config: &HaConfig,
+    inventory: &Inventory,
+    ledger: &mut Ledger,
+    decision_id: &str,
+    now: DateTime<Utc>,
+) -> Result<Option<ReconcileOutcome>, GrantError> {
+    let Some(grant) = grant::get(ledger, decision_id)? else {
+        return Ok(None);
+    };
+    if !grant.state.is_open() {
+        return Ok(Some(ReconcileOutcome::NotOpen));
+    }
+    if !grant::is_reconcilable(&grant, now) {
+        return Ok(Some(ReconcileOutcome::NotDue));
+    }
+    // Unlock bez výsledku treba najprv prevziať, inak by sa uzatváral stav, o
+    // ktorom ešte nevieme, ako skončil. Je to ten istý krok, ktorým začína
+    // periodický prechod po reštarte — a preto sa po ňom grant načítava znova.
+    if grant.state == GrantState::Granted {
+        grant::resume(ledger, now)?;
+    }
+    let grant = grant::get(ledger, decision_id)?
+        .ok_or(GrantError::Corrupt("grant vanished during reconciliation"))?;
+    if !grant.state.is_open() {
+        return Ok(Some(ReconcileOutcome::NotOpen));
+    }
+    // Prevzatie mohlo z `granted` urobiť `active` s okienkom, ktoré ešte platí:
+    // unlock sa vykonal a prístup legitímne beží. Zavrieť ho tu by znamenalo
+    // skrátiť platné okno, čo je presne to, čo táto cesta robiť nemá.
+    if !grant::is_reconcilable(&grant, now) {
+        return Ok(Some(ReconcileOutcome::NotDue));
+    }
+    match close_grant(config, inventory, ledger, &grant, now).await? {
+        // Uzavretie sa zapíše aj vtedy, keď ho nikto nepotvrdil; `Attempted` to
+        // hovorí nahlas, aby panel nemohol zahlásiť zatvorený prístup bez dôkazu.
+        Some(closed) if closed.state.is_open() => Ok(Some(ReconcileOutcome::Attempted)),
+        Some(_) => Ok(Some(ReconcileOutcome::Settled)),
+        None => Ok(Some(ReconcileOutcome::Unchanged)),
+    }
 }
 
 /// Uzavretie jedného grantu. `None` znamená, že sa v tomto prechode nič
@@ -895,5 +976,179 @@ mod tests {
         .unwrap();
         assert_eq!(settled.len(), 1);
         assert_eq!(settled[0].state, GrantState::Relocked);
+    }
+
+    /// Vyžiadané zosúladenie na grante, ktorého okno ešte platí.
+    ///
+    /// Toto je vlastnosť, na ktorej celé tlačidlo stojí: keby sa dalo stlačiť
+    /// uprostred platného okna, nebolo by to zosúladenie, ale odobranie
+    /// prístupu — a človek, ktorý si prístup zaslúžil, by o neho prišiel.
+    #[tokio::test]
+    async fn a_requested_pass_refuses_to_shorten_a_window_that_still_holds() {
+        let mut ledger = Ledger::open(":memory:").unwrap();
+        let grant = unlocked(&mut ledger, &timed_decision());
+        assert_eq!(grant.state, GrantState::Active);
+
+        let outcome = reconcile_grant(
+            &unreachable(),
+            &Inventory::new(),
+            &mut ledger,
+            &grant.decision_id,
+            moment("2026-09-29T18:40:00Z"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Some(ReconcileOutcome::NotDue));
+
+        // Nielen odpoveď: ani v ledgeri sa nič nepohlo.
+        let state = grant::access_state(&ledger, &grant.decision_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.grant.state, GrantState::Active);
+        assert_eq!(state.close_attempts, 0);
+        assert!(state.open_incidents.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_requested_pass_closes_an_expired_grant_the_device_confirms() {
+        let mut ledger = Ledger::open(":memory:").unwrap();
+        let grant = unlocked(&mut ledger, &timed_decision());
+        let inventory = Inventory::new();
+        inventory
+            .seed(vec![light(false, "2026-09-29T19:20:00+00:00")])
+            .await;
+
+        let outcome = reconcile_grant(
+            &unreachable(),
+            &inventory,
+            &mut ledger,
+            &grant.decision_id,
+            moment(AFTER_EXPIRY),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Some(ReconcileOutcome::Settled));
+
+        let state = grant::access_state(&ledger, &grant.decision_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.grant.state, GrantState::Relocked);
+        assert!(state.open_incidents.is_empty());
+
+        // Druhé stlačenie nemá čo robiť a nepredstiera, že má.
+        assert_eq!(
+            reconcile_grant(
+                &unreachable(),
+                &inventory,
+                &mut ledger,
+                &grant.decision_id,
+                moment("2026-09-29T19:45:00Z"),
+            )
+            .await
+            .unwrap(),
+            Some(ReconcileOutcome::NotOpen)
+        );
+    }
+
+    /// Zariadenie je nedostupné, takže uzavretie nikto nepotvrdí.
+    ///
+    /// Prvý pokus sa zapíše — inak by o možnom otvorenom prístupe nič
+    /// nesvedčilo — ale ako `Attempted`, nie `Settled`. Opakované stláčanie
+    /// potom nespotrebuje ďalší pokus ani nezaloží druhý incident.
+    #[tokio::test]
+    async fn a_requested_pass_records_an_attempt_without_claiming_the_device_closed() {
+        let mut ledger = Ledger::open(":memory:").unwrap();
+        let grant = unlocked(&mut ledger, &timed_decision());
+
+        let outcome = reconcile_grant(
+            &unreachable(),
+            &Inventory::new(),
+            &mut ledger,
+            &grant.decision_id,
+            moment(AFTER_EXPIRY),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Some(ReconcileOutcome::Attempted));
+
+        let state = grant::access_state(&ledger, &grant.decision_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.grant.state, GrantState::RelockPending);
+        assert_eq!(state.close_attempts, 1);
+        assert_eq!(state.open_incidents.len(), 1);
+        assert_eq!(state.open_incidents[0].kind, "relock_uncertain");
+
+        for _ in 0..3 {
+            assert_eq!(
+                reconcile_grant(
+                    &unreachable(),
+                    &Inventory::new(),
+                    &mut ledger,
+                    &grant.decision_id,
+                    moment("2026-09-29T19:31:00Z"),
+                )
+                .await
+                .unwrap(),
+                Some(ReconcileOutcome::Unchanged)
+            );
+        }
+        let state = grant::access_state(&ledger, &grant.decision_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.close_attempts, 1);
+        assert_eq!(state.open_incidents.len(), 1);
+    }
+
+    /// Unlock bez zapísaného výsledku: presne to, čo zostane po reštarte medzi
+    /// prijatím povelu a jeho výsledkom.
+    #[tokio::test]
+    async fn a_requested_pass_takes_over_a_grant_left_without_a_result() {
+        let mut ledger = Ledger::open(":memory:").unwrap();
+        let grant = grant::open(
+            &mut ledger,
+            &timed_decision(),
+            moment("2026-09-29T18:30:00Z"),
+        )
+        .unwrap();
+        assert_eq!(grant.state, GrantState::Granted);
+
+        // Okno ešte platí, takže prevzatie prebehne, ale nezatvára sa nič.
+        let outcome = reconcile_grant(
+            &unreachable(),
+            &Inventory::new(),
+            &mut ledger,
+            &grant.decision_id,
+            moment("2026-09-29T18:40:00Z"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Some(ReconcileOutcome::NotDue));
+
+        let state = grant::access_state(&ledger, &grant.decision_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.grant.state, GrantState::Active);
+        assert!(!state.grant.unlock_confirmed);
+        assert_eq!(state.open_incidents.len(), 1);
+        assert_eq!(state.open_incidents[0].kind, "result_lost");
+        assert_eq!(state.close_attempts, 0);
+    }
+
+    #[tokio::test]
+    async fn a_requested_pass_on_an_unknown_grant_finds_nothing() {
+        let mut ledger = Ledger::open(":memory:").unwrap();
+        assert_eq!(
+            reconcile_grant(
+                &unreachable(),
+                &Inventory::new(),
+                &mut ledger,
+                "ff77bdb0-70af-4f2a-a913-76609b66761b",
+                moment(AFTER_EXPIRY),
+            )
+            .await
+            .unwrap(),
+            None
+        );
     }
 }
