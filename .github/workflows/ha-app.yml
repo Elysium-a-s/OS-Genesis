@@ -75,7 +75,10 @@ jobs:
           # Značka a `io.hass.version` musia hovoriť to isté; Supervisor verí verzii.
           test "$(docker image inspect genesis-ha-pilot:ci --format '{{index .Config.Labels "io.hass.version"}}')" = '${{ steps.app.outputs.version }}'
           mkdir -p "$RUNNER_TEMP/genesis-data"
-          printf '%s\n' '{"read_token":"abcdefghijklmnopqrstuvwxyz012345","write_token":"ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"}' > "$RUNNER_TEMP/genesis-data/options.json"
+          # Žiadne možnosti pre Behavior kanál: presne tak, ako app vyzerá po
+          # čistej inštalácii. Prázdne hodnoty sa nesmú exportovať a jednotka
+          # musí naštartovať.
+          printf '%s\n' '{"read_token":"abcdefghijklmnopqrstuvwxyz012345","write_token":"ABCDEFGHIJKLMNOPQRSTUVWXYZ012345","sensitive_devices":"","behavior_key_id":"","behavior_secret":"","central_unit_id":""}' > "$RUNNER_TEMP/genesis-data/options.json"
           chmod 600 "$RUNNER_TEMP/genesis-data/options.json"
           container="$(docker run --platform linux/arm64 -d -e SUPERVISOR_TOKEN=ci-placeholder -e GENESIS_INGRESS_ONLY=false -v "$RUNNER_TEMP/genesis-data:/data" -p 127.0.0.1:18765:8080 genesis-ha-pilot:ci)"
           trap 'docker logs "$container"; docker rm -f "$container" >/dev/null' EXIT
@@ -90,6 +93,13 @@ jobs:
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:18765/v1/missing)" = 404
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:18765/v1/devices)" = 401
           test "$(curl --silent --header 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345' http://127.0.0.1:18765/v1/devices)" = "[]"
+          # Záloha je od 0.1.4 zapnutá v app. Dovtedy bol kód v obraze a
+          # endpoint odpovedal 503, pretože run.sh GENESIS_BACKUP_DIR nenastavil.
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST --header 'Authorization: Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ012345' http://127.0.0.1:18765/v1/backup)" = 201
+          test -n "$(ls "$RUNNER_TEMP/genesis-data/backups/")"
+          # Nenastavený Behavior kanál je vlastný stav, nie pád pri štarte: app
+          # bez tých možností musí bežať a endpoint to má povedať menom.
+          curl --silent --request POST --header 'Content-Type: application/json' --data '{}' http://127.0.0.1:18765/v1/behavior/decisions | grep -q behavior_channel_not_configured
           docker restart --time 3 "$container" >/dev/null
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:18765/health >/dev/null; then break; fi
@@ -98,6 +108,29 @@ jobs:
           curl --fail --silent http://127.0.0.1:18765/health
           test -s "$RUNNER_TEMP/genesis-data/genesis-ledger.sqlite3"
           docker stats --no-stream --format '{{.MemUsage}} {{.CPUPerc}}' "$container"
+      - name: Check the Behavior channel comes up when it is configured
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Druhý kontajner s nastavenými možnosťami. Bez tohto by sa dalo vydať
+          # app, v ktorej je kanál navždy tmavý — presne to bol stav do 0.1.3.
+          mkdir -p "$RUNNER_TEMP/genesis-behavior"
+          printf '%s\n' '{"read_token":"abcdefghijklmnopqrstuvwxyz012345","write_token":"ABCDEFGHIJKLMNOPQRSTUVWXYZ012345","behavior_key_id":"ci-key","behavior_secret":"ci-behavior-secret-of-32-chars-min","central_unit_id":"ad19a578-21e2-453f-a57c-1913350be34e"}' > "$RUNNER_TEMP/genesis-behavior/options.json"
+          chmod 600 "$RUNNER_TEMP/genesis-behavior/options.json"
+          container="$(docker run --platform linux/arm64 -d -e SUPERVISOR_TOKEN=ci-placeholder -e GENESIS_INGRESS_ONLY=false -v "$RUNNER_TEMP/genesis-behavior:/data" -p 127.0.0.1:18766:8080 genesis-ha-pilot:ci)"
+          trap 'docker logs "$container"; docker rm -f "$container" >/dev/null' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18766/health >/dev/null; then break; fi
+            sleep 2
+          done
+          curl --fail --silent http://127.0.0.1:18766/health
+          # Kanál je nastavený, takže sa už neodmieta pre chýbajúcu konfiguráciu;
+          # nepodpísané telo padne na podpise, čo je správny dôvod.
+          body="$(curl --silent --request POST --header 'Content-Type: application/json' --data '{}' http://127.0.0.1:18766/v1/behavior/decisions)"
+          ! grep -q behavior_channel_not_configured <<<"$body"
+          # Tajomstvo ani kľúč sa nesmú dostať do logu app.
+          ! docker logs "$container" 2>&1 | grep -q ci-behavior-secret-of-32-chars-min
+
       - name: Save image archive
         run: docker save genesis-ha-pilot:ci | gzip -1 > "$RUNNER_TEMP/genesis-ha-pilot-arm64.tar.gz"
       - uses: actions/upload-artifact@v4

@@ -1,6 +1,6 @@
 name: OS Genesis Pilot
 slug: genesis_pilot
-version: "0.1.3"
+version: "0.1.4"
 description: Pilotná centrálna služba Genesis pre Home Assistant Green
 url: https://github.com/Elysium-a-s/OS-Genesis
 arch:
@@ -18,8 +18,16 @@ options:
   write_token: null
   member_token: ""
   guest_token: ""
+  sensitive_devices: ""
+  behavior_key_id: ""
+  behavior_secret: ""
+  central_unit_id: ""
 schema:
   read_token: password
   write_token: password
   member_token: password?
   guest_token: password?
+  sensitive_devices: str?
+  behavior_key_id: str?
+  behavior_secret: password?
+  central_unit_id: str?

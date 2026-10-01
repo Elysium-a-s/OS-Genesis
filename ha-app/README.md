@@ -25,6 +25,20 @@ Obraz sa zostavuje aj pri zmene v `panel/`, nielen v `core/` a `ha-app/`. Panel 
 
 Repozitár aj GHCR balík `os-genesis-pilot` sú verejne dostupné na čítanie. Verziu `0.1.1` už Supervisor na Home Assistant Green stiahol; Ingress vo verzii `0.1.2` ešte treba overiť na skutočnom Green a cez vzdialené prihlásenie do HA. Verzia `0.1.3` prináša panel v Elysium dizajne; na skutočnom Green ani na fyzickom iPade ho zatiaľ nikto nevidel. Obnova po reštarte HA OS, skutočné zariadenie a merania CPU/RAM zostávajú otvorené akceptačné kroky Jira ELYSIUM-338 a ELYSIUM-336.
 
+Verzia `0.1.4` prináša ELYSIUM-353 až ELYSIUM-357: skutočný stav povelu a ledger v paneli, miestnosti z Home Assistanta namiesto troch napísaných, podpísaný kanál z Behavior, párovanie a odobranie prístupu a prehľad časových prístupov s incidentmi.
+
+### Čo bolo v obraze a nedalo sa zapnúť
+
+Tri veci boli v `main` aj v obraze od `0.1.3`, ale `run.sh` im nikdy nenastavil premennú, takže na jednotke boli tmavé. Vydať `0.1.4` len zvýšením čísla by znamenalo tvrdiť, že ELYSIUM-346, 348 a 355 sú v balíku, keď sa k nim prevádzkovateľ nemal ako dostať:
+
+| Funkcia | Chýbala premenná | Čo to na jednotke znamenalo |
+| --- | --- | --- |
+| Záloha (ELYSIUM-348) | `GENESIS_BACKUP_DIR` | `POST /v1/backup` odpovedal 503 |
+| Citlivé zariadenia pri hlase (ELYSIUM-346) | `GENESIS_SENSITIVE_DEVICES` | žiadne zariadenie nebolo citlivé, potvrdenie sa nikdy nevyžiadalo |
+| Podpísaný kanál z Behavior (ELYSIUM-355) | `GENESIS_BEHAVIOR_KEY_ID`, `GENESIS_BEHAVIOR_SECRET`, `GENESIS_CENTRAL_UNIT_ID` | `POST /v1/behavior/decisions` vždy odpovedal `behavior_channel_not_configured` |
+
+Nenastavené možnosti sa **neexportujú ako prázdne**. Core tieto premenné číta cez `env::var(...).ok()`, takže prázdny reťazec preň nie je „nenastavené", ale nastavená prázdna hodnota: prázdny `GENESIS_BEHAVIOR_KEY_ID` by zhodil štart app a prázdny `GENESIS_CENTRAL_UNIT_ID` by odmietol každé rozhodnutie Behavior. CI to overuje dvoma kontajnermi — jedným s prázdnymi možnosťami, ktorý musí naštartovať, a jedným s nastaveným kanálom, kde sa odmietnutie už nesmie odvolávať na chýbajúcu konfiguráciu a tajomstvo sa nesmie objaviť v logu.
+
 ## Kroky inštalácie
 
 Celý postup vrátane aktualizácie a rollbacku je v [docs/ELYSIUM-352-instalacia.md](../docs/ELYSIUM-352-instalacia.md). Skrátene:
