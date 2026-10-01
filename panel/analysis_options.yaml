@@ -2,4 +2,5 @@ analyzer:
   exclude:
     - build/**
     - web/**
+    - ios/**
 include: package:flutter_lints/flutter.yaml
