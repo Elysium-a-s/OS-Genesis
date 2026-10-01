@@ -25,7 +25,7 @@ Obraz sa zostavuje aj pri zmene v `panel/`, nielen v `core/` a `ha-app/`. Panel 
 
 Repozitár aj GHCR balík `os-genesis-pilot` sú verejne dostupné na čítanie. Verziu `0.1.1` už Supervisor na Home Assistant Green stiahol; Ingress vo verzii `0.1.2` ešte treba overiť na skutočnom Green a cez vzdialené prihlásenie do HA. Verzia `0.1.3` prináša panel v Elysium dizajne; na skutočnom Green ani na fyzickom iPade ho zatiaľ nikto nevidel. Obnova po reštarte HA OS, skutočné zariadenie a merania CPU/RAM zostávajú otvorené akceptačné kroky Jira ELYSIUM-338 a ELYSIUM-336.
 
-Verzia `0.1.4` prináša ELYSIUM-353 až ELYSIUM-357: skutočný stav povelu a ledger v paneli, miestnosti z Home Assistanta namiesto troch napísaných, podpísaný kanál z Behavior, párovanie a odobranie prístupu a prehľad časových prístupov s incidentmi.
+Verzia `0.1.4` prináša ELYSIUM-353 až ELYSIUM-357: skutočný stav povelu a ledger v paneli, miestnosti z Home Assistanta namiesto troch napísaných, podpísaný kanál z Behavior, párovanie a odobranie prístupu a prehľad časových prístupov s incidentmi. Je publikovaná (`sha256:97502fb4…`, tá istá ako nemenná `sha-34a1768`) — to znamená stiahnuteľná, nie overená: na skutočný Home Assistant Green ju zatiaľ nikto nenainštaloval.
 
 ### Čo bolo v obraze a nedalo sa zapnúť
 

@@ -85,9 +85,11 @@ Doteraz vydané:
 | --- | --- | --- |
 | `0.1.2` | `sha256:1ef49e43…` | Ingress, panel v pôvodnom Material vzhľade |
 | `0.1.3` | `sha256:1e049fc2…` | panel v Elysium dizajne |
-| `0.1.4` | doplní sa po publikovaní | ELYSIUM-353–357 a zapnutie zálohy, citlivých zariadení a Behavior kanála v app |
+| `0.1.4` | `sha256:97502fb4…` | ELYSIUM-353–357 a zapnutie zálohy, citlivých zariadení a Behavior kanála v app |
 
-Digest sa dá doplniť až po publikovaní: obraz vzniká pri pushi do `main`, takže v čase, keď sa `version` zvyšuje, ešte neexistuje. Riadok s dopísaným digestom je záznam o tom, čo bolo vydané, nie plán.
+Digest sa dá doplniť až po publikovaní: obraz vzniká pri pushi do `main`, takže v čase, keď sa `version` zvyšuje, ešte neexistuje. Riadok je preto záznam o tom, čo bolo vydané, nie plán.
+
+Verzia `0.1.4` nesie ten istý obraz ako nemenná značka `sha-34a1768` (plný digest `sha256:97502fb4ad903f9ae38377c86f8af6cbe73d9567c541bfcb62b1654d19dc10ca`, commit `34a17681e844b9d04d76fa7a126ad26e1e2cb3f8`). Rovnaký digest pre obe značky je dôkaz, že sa publikoval presne ten obraz, ktorý prešiel smoke testom — workflow robí `docker tag`, nie druhý build.
 
 ### Prázdna možnosť nie je nastavená možnosť
 
