@@ -85,6 +85,15 @@ Doteraz vydané:
 | --- | --- | --- |
 | `0.1.2` | `sha256:1ef49e43…` | Ingress, panel v pôvodnom Material vzhľade |
 | `0.1.3` | `sha256:1e049fc2…` | panel v Elysium dizajne |
+| `0.1.4` | doplní sa po publikovaní | ELYSIUM-353–357 a zapnutie zálohy, citlivých zariadení a Behavior kanála v app |
+
+Digest sa dá doplniť až po publikovaní: obraz vzniká pri pushi do `main`, takže v čase, keď sa `version` zvyšuje, ešte neexistuje. Riadok s dopísaným digestom je záznam o tom, čo bolo vydané, nie plán.
+
+### Prázdna možnosť nie je nastavená možnosť
+
+Voliteľné možnosti app (`sensitive_devices`, `behavior_key_id`, `behavior_secret`, `central_unit_id`) sa pri prázdnej hodnote **neexportujú vôbec**. Core ich číta cez `env::var(...).ok()`, takže prázdny reťazec preň nie je „nenastavené", ale nastavená prázdna hodnota — a to má dva konkrétne následky, ktoré by sa inak objavili až na jednotke: prázdny `GENESIS_BEHAVIOR_KEY_ID` zhodí štart app, a prázdny `GENESIS_CENTRAL_UNIT_ID` spôsobí, že jednotka odmietne každé rozhodnutie Behavior, pretože žiadne UUID sa nerovná prázdnemu reťazcu.
+
+Platí to od `0.1.4`. V `0.1.3` tieto premenné `run.sh` nenastavoval vôbec, takže záloha, citlivé zariadenia a Behavior kanál boli v obraze, ale na jednotke sa nedali zapnúť.
 
 ## 6. Čo nie je overené
 
