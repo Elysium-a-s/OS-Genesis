@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'genesis_api.dart';
 import 'theme.dart';
 import 'token_store.dart';
+import 'transport.dart';
 
 void main() => runApp(const GenesisApp());
 
@@ -175,15 +176,11 @@ class _GenesisHomeState extends State<GenesisHome> {
     });
   }
 
-  Uri? _baseUrl() {
-    final base = Uri.tryParse(_url.text.trim());
-    if (base == null ||
-        (base.scheme != 'http' && base.scheme != 'https') ||
-        base.host.isEmpty) {
-      return null;
-    }
-    return base;
-  }
+  /// Posúdená adresa. Jediné miesto, kde sa rozhoduje, kam sa panel pripojí —
+  /// takže odmietnutie nemôže obísť žiadna cesta, ktorá adresu potrebuje.
+  GenesisAddress get _address => GenesisAddress.parse(_url.text);
+
+  Uri? _baseUrl() => _address.uri;
 
   Future<void> _checkHealth() async {
     final base = _baseUrl();
@@ -2202,7 +2199,22 @@ class _GenesisHomeState extends State<GenesisHome> {
                 keyboardType: TextInputType.url,
                 style: theme.textTheme.bodyLarge,
                 decoration: const InputDecoration(labelText: 'Adresa Genesis API'),
+                onChanged: (_) => setState(() {}),
                 onSubmitted: (_) => _checkHealth(),
+              ),
+              const SizedBox(height: 8),
+              // Verdikt o adrese je vidieť vždy, nielen keď je zlá: pilotný
+              // režim je vedomé rozhodnutie a človek má vedieť, že v ňom je.
+              Text(
+                _address.explanation,
+                style: theme.textTheme.labelMedium?.copyWith(
+                  color: switch (_address.verdict) {
+                    GenesisAddressVerdict.secure => ElysiumColors.teal,
+                    GenesisAddressVerdict.localPilot => ElysiumColors.caution,
+                    GenesisAddressVerdict.unusable => null,
+                    _ => ElysiumColors.danger,
+                  },
+                ),
               ),
               const SizedBox(height: 12),
               TextField(
@@ -2218,12 +2230,12 @@ class _GenesisHomeState extends State<GenesisHome> {
               const SizedBox(height: 16),
               Wrap(spacing: 12, runSpacing: 12, children: [
                 FilledButton.icon(
-                  onPressed: _checkHealth,
+                  onPressed: _address.isUsable ? _checkHealth : null,
                   icon: const Icon(Icons.refresh, size: 18),
                   label: const Text('Skontrolovať spojenie'),
                 ),
                 OutlinedButton.icon(
-                  onPressed: _refreshDevices,
+                  onPressed: _address.isUsable ? _refreshDevices : null,
                   icon: const Icon(Icons.devices, size: 18),
                   label: const Text('Načítať zariadenia'),
                 ),

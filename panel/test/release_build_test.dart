@@ -24,10 +24,15 @@ void main() {
   /// ktorú nikto neurobí ručne pri štvrtej zmene v `main.dart`.
   test('no source file carries a baked address, token or debug switch', () {
     final offences = <String>[];
+    // Hľadá sa **cieľová adresa**, nie slovo. `lib/transport.dart` musí lokálne
+    // rozsahy pomenovať, pretože ich triedi — `'localhost'` ako porovnávaný
+    // reťazec nie je zapečený cieľ, kým `'http://localhost:8765'` ním bol.
+    // Širší vzor by nútil vypnúť kontrolu pre celý súbor, čo je horšie: potom by
+    // sa v ňom skutočná adresa schovala.
     final suspicious = <RegExp, String>{
-      RegExp(r'localhost'): 'vývojová adresa',
-      RegExp(r'127\.0\.0\.1'): 'vývojová adresa',
-      RegExp(r'10\.0\.2\.2'): 'adresa emulátora',
+      RegExp(r'https?://localhost'): 'vývojová adresa',
+      RegExp(r'https?://127\.0\.0\.1'): 'vývojová adresa',
+      RegExp(r'https?://10\.0\.2\.2'): 'adresa emulátora',
       RegExp(r'''(?:Bearer|token)\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}['"]'''):
           'zapísaný token',
       RegExp(r'debugShowCheckedModeBanner:\s*true'): 'debug prepínač',
