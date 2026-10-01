@@ -707,6 +707,37 @@ class GenesisVoiceAuditEvent {
       );
 }
 
+/// Jedna záloha, ktorú jednotka má.
+///
+/// Cesta tajomstvo nie je — meno je iba čas vzniku — ale patrí vlastníkovi
+/// rovnako ako samotná záloha, takže sa čita pod jeho tokenom.
+class GenesisBackup {
+  const GenesisBackup({
+    required this.path,
+    required this.bytes,
+    required this.at,
+  });
+
+  final String path;
+  final int bytes;
+  final DateTime? at;
+
+  factory GenesisBackup.fromJson(Map<String, dynamic> json) => GenesisBackup(
+        path: json['path'] as String,
+        bytes: (json['bytes'] as num).toInt(),
+        at: DateTime.tryParse(json['at'] as String? ?? ''),
+      );
+
+  /// Veľkosť pre človeka. Bajty na disku jednotky nikoho nezaujímajú presne.
+  String get size {
+    if (bytes >= 1048576) {
+      return '${(bytes / 1048576).toStringAsFixed(1)} MB';
+    }
+    if (bytes >= 1024) return '${(bytes / 1024).toStringAsFixed(0)} kB';
+    return '$bytes B';
+  }
+}
+
 class GenesisApi {
   GenesisApi({required this.baseUrl, http.Client? client})
       : _client = client ?? http.Client(),
@@ -1026,7 +1057,54 @@ class GenesisApi {
         .toList();
   }
 
+  /// Zálohy jednotky, najnovšia prvá.
+  ///
+  /// Prázdny zoznam znamená, že záloha ešte nebola. 503 znamená, že jednotka
+  /// zálohovanie nemá nastavené — to sú dve rôzne veci a klient ich nezlieva,
+  /// preto 503 vyhodí a prázdno vráti.
+  Future<List<GenesisBackup>> backups(String ownerToken) async {
+    final response = await _client.get(
+      _path('v1/backup'),
+      headers: {'Authorization': 'Bearer $ownerToken'},
+    ).timeout(const Duration(seconds: 5));
+    _refuseIfUnauthorized(response, 'backups');
+    if (response.statusCode != 200) {
+      throw StateError('Genesis backups HTTP ${response.statusCode}');
+    }
+    return _asList(response)
+        .map((item) => GenesisBackup.fromJson(item as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Vytvorí zálohu. `VACUUM INTO` na jednotke, takže je celá aj počas zápisu.
+  ///
+  /// 409 znamená, že záloha pre ten okamih už existuje; prepísať ju jednotka
+  /// odmieta a je to správne — záloha, ktorá prepíše predchádzajúcu, je horšia
+  /// než chýbajúca. Má preto vlastný typ, aby to panel vedel povedať.
+  Future<GenesisBackup> createBackup(String ownerToken) async {
+    final response = await _client.post(
+      _path('v1/backup'),
+      headers: {'Authorization': 'Bearer $ownerToken'},
+    ).timeout(const Duration(seconds: 30));
+    _refuseIfUnauthorized(response, 'backup');
+    if (response.statusCode == 409) {
+      throw const GenesisBackupExists();
+    }
+    if (response.statusCode != 201) {
+      throw StateError('Genesis backup HTTP ${response.statusCode}');
+    }
+    return GenesisBackup.fromJson(_asObject(response));
+  }
+
   void close() {
     if (_ownsClient) _client.close();
   }
+}
+
+/// Záloha pre ten okamih už existuje a jednotka ju neprepíše.
+class GenesisBackupExists implements Exception {
+  const GenesisBackupExists();
+
+  @override
+  String toString() => 'Genesis backup: a backup for this moment already exists';
 }

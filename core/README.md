@@ -329,7 +329,13 @@ Tokeny z konfigurácie zostávajú a sú prvé v poradí — sú bootstrapom, kt
 
 Celý stav Genesis je jeden SQLite súbor: povely a ich audit, granty, hlasové záznamy a vydané kreditívy. Postup aj to, čo Genesis po reštarte urobí sám, je v [docs/ELYSIUM-348-obnova.md](../docs/ELYSIUM-348-obnova.md).
 
-`POST /v1/backup` s owner tokenom vypíše konzistentnú kópiu do `GENESIS_BACKUP_DIR` a vráti cestu a veľkosť. Kópia vzniká cez SQLite `VACUUM INTO`, takže je celá a platná aj vtedy, keď sa práve zapisuje — **`cp` za behu nie je záloha**. Existujúci súbor sa neprepíše. Záloha je plnohodnotná databáza, takže sa dá otvoriť a overiť bez obnovy.
+`POST /v1/backup` s owner tokenom vypíše konzistentnú kópiu do `GENESIS_BACKUP_DIR` a vráti cestu a veľkosť. Kópia vzniká cez SQLite `VACUUM INTO`, takže je celá a platná aj vtedy, keď sa práve zapisuje — **`cp` za behu nie je záloha**. Existujúci súbor sa neprepíše (409). Záloha je plnohodnotná databáza, takže sa dá otvoriť a overiť bez obnovy.
+
+`GET /v1/backup` vracia, čo jednotka má, najnovšie prvé, ohraničené na 50 záznamov. Tiež iba owner: cesty sú o súborovom systéme jednotky a komu patrí záloha, patrí aj jej zoznam. Tajomstvo v odpovedi nie je — meno súboru je iba čas vzniku.
+
+Čas v prehľade sa berie **z mena súboru**, nie z času úpravy: ten sa dá zmeniť kopírovaním aj `touch`-om. Meno sa skladá a rozoberá na jednom mieste (`backup::file_name` a `backup::moment_from`), takže sa tie dve pravidlá nemôžu rozísť, a dvojbodky sa vracajú iba do časovej časti za `T` — dátum spojovníky nesie legitímne. Súbor, ktorý sa nedá prečítať ako záloha Genesis, sa z prehľadu zahodí namiesto toho, aby sa hlásil ako záloha.
+
+Nenastavený `GENESIS_BACKUP_DIR` je 503, nie prázdny zoznam. Prázdny zoznam znamená, že záloha ešte nebola; to prvé je stav jednotky, to druhé stav domácnosti, a zliať ich by znamenalo tvrdiť, že zálohovanie funguje a nikto ho nepoužil.
 
 Obnovu robí prevádzkovateľ pri zastavenej službe; Genesis ju úmyselne nevie spustiť sám, pretože podsunúť si súbor pod otvoreným spojením je cesta k poškodeniu.
 

@@ -130,6 +130,17 @@ MockClient _unit({
       return _ok('{}', 404);
     });
 
+/// Ťuknutie, ktoré prežije rast stránky.
+///
+/// `ensureVisible` scroll iba spustí; bez doznenia animácie ťuknutie minie cieľ,
+/// a pridanie sekcie vyššie na stránke tak zlomí test, ktorý s ňou nesúvisí.
+Future<void> _press(WidgetTester tester, Finder target) async {
+  await tester.ensureVisible(target);
+  await _settle(tester);
+  await tester.tap(target);
+  await _settle(tester);
+}
+
 Future<void> _signIn(WidgetTester tester, String token) async {
   await tester.enterText(
     find.widgetWithText(TextField, 'Prístupový token'),
@@ -171,8 +182,7 @@ void main() {
       find.widgetWithText(TextField, 'Identifikátor člena'),
       'zuzana',
     );
-    await tester.ensureVisible(find.text('Vydať kód'));
-    await tester.tap(find.text('Vydať kód'));
+    await _press(tester, find.text('Vydať kód'));
     await _settle(tester);
 
     // Kód sa zobrazí, a panel povie, že druhýkrát nebude.
@@ -188,8 +198,7 @@ void main() {
     expect(jsonDecode((issue as http.Request).body)['role'], 'member');
     expect(jsonDecode(issue.body)['actor_id'], 'zuzana');
 
-    await tester.ensureVisible(find.text('Mám ho'));
-    await tester.tap(find.text('Mám ho'));
+    await _press(tester, find.text('Mám ho'));
     await _settle(tester);
     expect(find.text(_pairingCode), findsNothing);
   });
@@ -234,8 +243,7 @@ void main() {
       find.widgetWithText(TextField, 'Párovací kód'),
       _pairingCode,
     );
-    await tester.ensureVisible(find.text('Uplatniť kód'));
-    await tester.tap(find.text('Uplatniť kód'));
+    await _press(tester, find.text('Uplatniť kód'));
     await _settle(tester);
 
     // Vypršaný, už uplatnený a odobraný kód vyzerajú rovnako — panel nehádá,
@@ -270,8 +278,7 @@ void main() {
       find.widgetWithText(TextField, 'Párovací kód'),
       _pairingCode,
     );
-    await tester.ensureVisible(find.text('Uplatniť kód'));
-    await tester.tap(find.text('Uplatniť kód'));
+    await _press(tester, find.text('Uplatniť kód'));
     await _settle(tester);
 
     // Token je v úložisku a panel ožil.
@@ -343,8 +350,7 @@ void main() {
     await _signIn(tester, _ownerToken);
 
     expect(find.text('Odobrať'), findsOneWidget);
-    await tester.ensureVisible(find.text('Odobrať'));
-    await tester.tap(find.text('Odobrať'));
+    await _press(tester, find.text('Odobrať'));
     await _settle(tester);
 
     expect(revoked, ['cred-1']);
