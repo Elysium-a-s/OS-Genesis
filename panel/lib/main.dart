@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 
 import 'genesis_api.dart';
 import 'theme.dart';
+import 'token_store.dart';
 
 void main() => runApp(const GenesisApp());
 
@@ -16,12 +17,15 @@ String genesisDefaultApiUrl() {
 }
 
 class GenesisApp extends StatelessWidget {
-  const GenesisApp({super.key, this.client});
+  const GenesisApp({super.key, this.client, this.tokenStore});
 
   /// Vymeniteľný HTTP klient. Prezentácia neistého výsledku a výpadku Home
   /// Assistanta sa inak nedá otestovať bez skutočnej jednotky, a práve tie dve
   /// veci sa nesmú zobraziť ako úspech.
   final http.Client? client;
+
+  /// Kde žije vydaný token. V testoch v pamäti; inak podľa platformy.
+  final GenesisTokenStore? tokenStore;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -32,7 +36,7 @@ class GenesisApp extends StatelessWidget {
         theme: elysiumTheme(Brightness.light),
         darkTheme: elysiumTheme(Brightness.dark),
         themeMode: ThemeMode.system,
-        home: GenesisHome(client: client),
+        home: GenesisHome(client: client, tokenStore: tokenStore),
       );
 }
 
@@ -45,9 +49,10 @@ enum ConnectionStatus { checking, online, offline }
 enum AreaScope { whole, area, withoutArea }
 
 class GenesisHome extends StatefulWidget {
-  const GenesisHome({super.key, this.client});
+  const GenesisHome({super.key, this.client, this.tokenStore});
 
   final http.Client? client;
+  final GenesisTokenStore? tokenStore;
 
   @override
   State<GenesisHome> createState() => _GenesisHomeState();
@@ -59,6 +64,7 @@ class _GenesisHomeState extends State<GenesisHome> {
   GenesisPrincipal? _principal;
   late final http.Client _client = widget.client ?? http.Client();
   late final bool _ownsClient = widget.client == null;
+  late final GenesisTokenStore _tokenStore = widget.tokenStore ?? SecureTokenStore();
   Timer? _timer;
   ConnectionStatus _status = ConnectionStatus.checking;
   GenesisInventory? _inventory;
@@ -73,14 +79,54 @@ class _GenesisHomeState extends State<GenesisHome> {
   String? _ledgerError;
   GenesisDiagnostics? _diagnostics;
   String? _diagnosticsError;
+  final _pairingActor = TextEditingController();
+  final _redeemCode = TextEditingController();
+  final _redeemHousehold = TextEditingController();
+  String _pairingRole = 'member';
+  /// Vydaný kód. Drží sa, kým ho vlastník nezatvorí — zobraziť sa dá raz.
+  GenesisPairing? _issuedCode;
+  List<GenesisCredential> _credentials = [];
+  String? _accessError;
+  String? _accessNotice;
+  bool _busyWithAccess = false;
 
   @override
   void initState() {
     super.initState();
     _checkHealth();
+    _restoreToken();
     _timer = Timer.periodic(const Duration(seconds: 15), (_) {
       _checkHealth();
       if (_accessToken.text.isNotEmpty) _refreshDevices();
+    });
+  }
+
+  /// Token z úložiska. Bez neho by člen po obnovení stránky o prístup prišiel a
+  /// nový kód mu nemá kto vydať — párovací kód sa dá uplatniť práve raz.
+  Future<void> _restoreToken() async {
+    final stored = await _tokenStore.read();
+    if (!mounted || stored == null || stored.isEmpty) return;
+    setState(() => _accessToken.text = stored);
+    await _refreshDevices();
+  }
+
+  /// Token, ktorý jednotka odmietla, sa zahodí.
+  ///
+  /// Odobraná kreditíva nie je chyba siete a opakovanie ju nevráti, takže sa
+  /// token vymaže z úložiska aj z poľa. Panel potom povie jedinú vec, ktorá
+  /// pomôže: požiadať vlastníka o nový kód.
+  Future<void> _accessWasRefused() async {
+    await _tokenStore.clear();
+    if (!mounted) return;
+    setState(() {
+      _principal = null;
+      _inventory = null;
+      _diagnostics = null;
+      _credentials = [];
+      _commands = [];
+      _accessToken.clear();
+      _accessNotice =
+          'Prístup bol odobraný alebo vypršal. Požiadaj vlastníka o nový párovací kód.';
     });
   }
 
@@ -130,9 +176,14 @@ class _GenesisHomeState extends State<GenesisHome> {
           _principal = principal;
           _inventory = inventory;
           _inventoryError = null;
+          _accessNotice = null;
           _keepSelectionValid(inventory);
         });
       }
+      if (principal.role == 'owner') await _refreshCredentials();
+    } on GenesisUnauthorized {
+      await _accessWasRefused();
+      return;
     } catch (_) {
       if (mounted) {
         setState(() {
@@ -208,6 +259,9 @@ class _GenesisHomeState extends State<GenesisHome> {
           _diagnosticsError = null;
         });
       }
+    } on GenesisUnauthorized {
+      await _accessWasRefused();
+      return;
     } catch (_) {
       if (mounted) {
         setState(() {
@@ -309,6 +363,8 @@ class _GenesisHomeState extends State<GenesisHome> {
         setState(() => _lastCommand = result);
         await _refreshDevices();
       }
+    } on GenesisUnauthorized {
+      await _accessWasRefused();
     } catch (_) {
       if (mounted) {
         setState(() => _commandMessage =
@@ -325,6 +381,9 @@ class _GenesisHomeState extends State<GenesisHome> {
     if (_ownsClient) _client.close();
     _url.dispose();
     _accessToken.dispose();
+    _pairingActor.dispose();
+    _redeemCode.dispose();
+    _redeemHousehold.dispose();
     super.dispose();
   }
 
@@ -416,6 +475,8 @@ class _GenesisHomeState extends State<GenesisHome> {
                   _devicesSection(),
                   const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
                   _diagnosticsSection(),
+                  const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
+                  _accessSection(),
                   const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
                   _ledgerSection(),
                   const SizedBox(height: ElysiumLayout.sectionSpacing + 8),
@@ -650,6 +711,395 @@ class _GenesisHomeState extends State<GenesisHome> {
         const SizedBox(width: 12),
         ElysiumStatusPill(label: label, color: color),
       ],
+    );
+  }
+
+  /// Vydané identity domácnosti. Vidí ich iba vlastník, takže sa načítajú až
+  /// keď je rola známa.
+  Future<void> _refreshCredentials() async {
+    final base = _baseUrl();
+    if (base == null || _accessToken.text.isEmpty) return;
+    try {
+      final api = GenesisApi(baseUrl: base, client: _client);
+      final credentials = await api.credentials(_accessToken.text);
+      if (mounted) {
+        setState(() {
+          _credentials = credentials;
+          _accessError = null;
+        });
+      }
+    } on GenesisUnauthorized {
+      await _accessWasRefused();
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _credentials = [];
+          _accessError = 'Zoznam vydaných identít sa nepodarilo prečítať.';
+        });
+      }
+    }
+  }
+
+  /// Vlastník vydá párovací kód.
+  Future<void> _issuePairing() async {
+    final base = _baseUrl();
+    final actor = _pairingActor.text.trim();
+    final household = _principal?.householdId;
+    if (base == null || household == null || actor.isEmpty) {
+      setState(() => _accessError =
+          'Na vydanie kódu treba spojenie, rolu vlastníka a identifikátor člena.');
+      return;
+    }
+    setState(() {
+      _busyWithAccess = true;
+      _accessError = null;
+    });
+    try {
+      final api = GenesisApi(baseUrl: base, client: _client);
+      final pairing = await api.createPairing(
+        ownerToken: _accessToken.text,
+        householdId: household,
+        role: _pairingRole,
+        actorId: actor,
+      );
+      if (mounted) {
+        setState(() {
+          _issuedCode = pairing;
+          _pairingActor.clear();
+        });
+      }
+      await _refreshCredentials();
+    } on GenesisUnauthorized {
+      await _accessWasRefused();
+    } catch (_) {
+      if (mounted) {
+        setState(() => _accessError =
+            'Kód sa nepodarilo vydať. Identifikátor člena už môže mať rozbehnuté párovanie.');
+      }
+    } finally {
+      if (mounted) setState(() => _busyWithAccess = false);
+    }
+  }
+
+  /// Člen uplatní kód a panel si vydaný token uloží.
+  ///
+  /// Kód ide v tele požiadavky, nie v adrese, a token sa nikde nevypisuje —
+  /// z panela sa dostane len do úložiska a do hlavičky `Authorization`.
+  Future<void> _redeem() async {
+    final base = _baseUrl();
+    final code = _redeemCode.text.trim();
+    final household = _redeemHousehold.text.trim();
+    if (base == null || code.isEmpty || household.isEmpty) {
+      setState(() => _accessError =
+          'Na uplatnenie treba adresu jednotky, domácnosť a párovací kód.');
+      return;
+    }
+    setState(() {
+      _busyWithAccess = true;
+      _accessError = null;
+    });
+    try {
+      final api = GenesisApi(baseUrl: base, client: _client);
+      final issued = await api.redeemPairing(householdId: household, code: code);
+      await _tokenStore.write(issued.token);
+      if (mounted) {
+        setState(() {
+          _accessToken.text = issued.token;
+          _redeemCode.clear();
+          _accessNotice = null;
+          _accessError = null;
+        });
+      }
+      await _refreshDevices();
+    } catch (_) {
+      // Jednotka nerozlišuje, prečo kód neplatí, a panel to nemá dopĺňať:
+      // vypršaný, už uplatnený aj odobraný kód vyzerajú rovnako a hádať, ktorý
+      // z nich to bol, by bola informácia o cudzej domácnosti.
+      if (mounted) {
+        setState(() => _accessError =
+            'Kód neplatí. Mohol vypršať, už byť uplatnený alebo odobraný — '
+            'požiadaj vlastníka o nový.');
+      }
+    } finally {
+      if (mounted) setState(() => _busyWithAccess = false);
+    }
+  }
+
+  Future<void> _revoke(GenesisCredential credential) async {
+    final base = _baseUrl();
+    if (base == null) return;
+    setState(() {
+      _busyWithAccess = true;
+      _accessError = null;
+    });
+    try {
+      final api = GenesisApi(baseUrl: base, client: _client);
+      await api.revokeCredential(
+        ownerToken: _accessToken.text,
+        credentialId: credential.credentialId,
+      );
+      await _refreshCredentials();
+    } on GenesisUnauthorized {
+      await _accessWasRefused();
+    } catch (_) {
+      if (mounted) {
+        setState(() => _accessError = 'Prístup sa nepodarilo odobrať.');
+      }
+    } finally {
+      if (mounted) setState(() => _busyWithAccess = false);
+    }
+  }
+
+  /// Vydávanie a odoberanie prístupu.
+  Widget _accessSection() {
+    final theme = Theme.of(context);
+    final owner = _principal?.role == 'owner';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const ElysiumSectionLabel('Prístup'),
+        const SizedBox(height: 10),
+        Text(
+          'Prístup sa vydáva párovacím kódom a dá sa odobrať. Kód aj token uvidíš '
+          'práve raz — jednotka si z nich drží len odtlačok, takže ani vlastník '
+          'ich nevie zobraziť druhýkrát.',
+          style: theme.textTheme.bodyMedium,
+        ),
+        const SizedBox(height: 14),
+        if (_accessNotice != null) ...[
+          ElysiumCard(
+            accent: ElysiumColors.danger,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(Icons.lock_outline, color: ElysiumColors.danger),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(_accessNotice!, style: theme.textTheme.bodyLarge),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
+        if (_accessError != null) ...[
+          ElysiumCard(
+            accent: ElysiumColors.caution,
+            child: Text(_accessError!, style: theme.textTheme.bodyLarge),
+          ),
+          const SizedBox(height: 12),
+        ],
+        if (_issuedCode != null) ...[
+          _issuedCodeCard(_issuedCode!),
+          const SizedBox(height: 12),
+        ],
+        if (owner) ...[
+          _issueCard(),
+          const SizedBox(height: 12),
+          _credentialsCard(),
+          const SizedBox(height: 12),
+        ] else if (_principal != null) ...[
+          ElysiumCard(
+            child: Text(
+              'Vydávať a odoberať prístup môže iba vlastník domácnosti. '
+              'Tvoja rola je ${_principal!.role}.',
+              style: theme.textTheme.bodyMedium,
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
+        _redeemCard(),
+      ],
+    );
+  }
+
+  /// Kód sa zobrazí raz a panel to hovorí nahlas.
+  Widget _issuedCodeCard(GenesisPairing pairing) {
+    final theme = Theme.of(context);
+    final colors = ElysiumColors.of(context);
+    return ElysiumCard(
+      accent: colors.gold,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Párovací kód pre ${pairing.actorId}',
+              style: theme.textTheme.titleMedium),
+          const SizedBox(height: 10),
+          SelectableText(
+            pairing.code,
+            style: theme.textTheme.headlineSmall?.copyWith(
+              fontFeatures: const [],
+              letterSpacing: 2,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Rola ${pairing.role}. Zobrazuje sa raz — odpíš ho teraz, jednotka ho '
+            'druhýkrát nevydá.',
+            style: theme.textTheme.bodyMedium,
+          ),
+          if (pairing.expiresAt != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              'Platí do ${_formatMoment(pairing.expiresAt!.toLocal())}',
+              style: theme.textTheme.labelMedium,
+            ),
+          ],
+          const SizedBox(height: 14),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton(
+              onPressed: () => setState(() => _issuedCode = null),
+              child: const Text('Mám ho'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _issueCard() {
+    final theme = Theme.of(context);
+    return ElysiumCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Vydať párovací kód', style: theme.textTheme.titleLarge),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _pairingActor,
+            style: theme.textTheme.bodyLarge,
+            decoration: const InputDecoration(labelText: 'Identifikátor člena'),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            children: [
+              for (final role in const ['member', 'guest'])
+                ChoiceChip(
+                  label: Text(role),
+                  selected: _pairingRole == role,
+                  onSelected: (_) => setState(() => _pairingRole = role),
+                ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            onPressed: _busyWithAccess ? null : _issuePairing,
+            icon: const Icon(Icons.key_outlined, size: 18),
+            label: const Text('Vydať kód'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _credentialsCard() {
+    final theme = Theme.of(context);
+    final colors = ElysiumColors.of(context);
+    final live = _credentials.where((item) => !item.isRevoked).toList();
+    final revoked = _credentials.where((item) => item.isRevoked).toList();
+    return ElysiumCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Vydané identity', style: theme.textTheme.titleLarge),
+          const SizedBox(height: 10),
+          if (_credentials.isEmpty)
+            Text(
+              'Zatiaľ nie je vydaná žiadna identita. Tokeny z konfigurácie '
+              'jednotky sa tu nezobrazujú — nikto ich nevydal, sú bootstrapom.',
+              style: theme.textTheme.bodyMedium,
+            ),
+          for (final credential in [...live, ...revoked]) ...[
+            Divider(color: colors.border, height: 24),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(credential.actorId, style: theme.textTheme.titleMedium),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Rola ${credential.role}',
+                        style: theme.textTheme.labelMedium,
+                      ),
+                      if (credential.issuedAt != null)
+                        Text(
+                          'Vydané ${_formatMoment(credential.issuedAt!.toLocal())}',
+                          style: theme.textTheme.labelMedium,
+                        ),
+                      Text(
+                        credential.isUnused
+                            ? 'Zatiaľ nepoužité'
+                            : 'Naposledy použité ${_formatMoment(credential.lastUsedAt!.toLocal())}',
+                        style: theme.textTheme.labelMedium,
+                      ),
+                      if (credential.isRevoked)
+                        Text(
+                          'Odobrané ${_formatMoment(credential.revokedAt!.toLocal())}'
+                          '${credential.revokedBy == null ? '' : ' — ${credential.revokedBy}'}',
+                          style: theme.textTheme.labelMedium,
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                if (credential.isRevoked)
+                  const ElysiumStatusPill(
+                    label: 'Odobrané',
+                    color: ElysiumColors.danger,
+                  )
+                else
+                  OutlinedButton(
+                    onPressed: _busyWithAccess ? null : () => _revoke(credential),
+                    child: const Text('Odobrať'),
+                  ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _redeemCard() {
+    final theme = Theme.of(context);
+    return ElysiumCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Mám párovací kód', style: theme.textTheme.titleLarge),
+          const SizedBox(height: 10),
+          Text(
+            'Kód sa posiela v tele požiadavky, nie v adrese. Vydaný token zostane '
+            'v úložisku tohto zariadenia a panel ho nikde nevypisuje.',
+            style: theme.textTheme.bodyMedium,
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _redeemHousehold,
+            style: theme.textTheme.bodyLarge,
+            decoration: const InputDecoration(labelText: 'Domácnosť'),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _redeemCode,
+            obscureText: true,
+            style: theme.textTheme.bodyLarge,
+            decoration: const InputDecoration(labelText: 'Párovací kód'),
+            onSubmitted: (_) => _redeem(),
+          ),
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            onPressed: _busyWithAccess ? null : _redeem,
+            icon: const Icon(Icons.login, size: 18),
+            label: const Text('Uplatniť kód'),
+          ),
+        ],
+      ),
     );
   }
 

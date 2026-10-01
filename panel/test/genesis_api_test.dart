@@ -225,6 +225,129 @@ void main() {
     expect(link.lastError, isNull);
   });
 
+  test('a refused token has its own type, so it is not retried as a glitch', () async {
+    final client = MockClient((request) async => _ok('{}', 401));
+    final api = GenesisApi(
+      baseUrl: Uri.parse('http://green.local:8765'),
+      client: client,
+    );
+    // Odobraná kreditíva nie je chyba siete: panel ju musí rozlíšiť, inak by
+    // token skúšal dokola.
+    expect(() => api.me('revoked-token'), throwsA(isA<GenesisUnauthorized>()));
+    expect(
+      () => api.inventory('revoked-token'),
+      throwsA(isA<GenesisUnauthorized>()),
+    );
+    expect(
+      () => api.credentials('revoked-token'),
+      throwsA(isA<GenesisUnauthorized>()),
+    );
+    expect(
+      () => api.revokeCredential(
+        ownerToken: 'revoked-token',
+        credentialId: 'cred-1',
+      ),
+      throwsA(isA<GenesisUnauthorized>()),
+    );
+    // Guest, ktorý skúsi správu, dostane 403 — pre panel je to to isté: tento
+    // token na to nemá.
+    final forbidden = MockClient((request) async => _ok('{}', 403));
+    final guest = GenesisApi(
+      baseUrl: Uri.parse('http://green.local:8765'),
+      client: forbidden,
+    );
+    expect(
+      () => guest.credentials('guest-token'),
+      throwsA(isA<GenesisUnauthorized>()),
+    );
+  });
+
+  test('a pairing code and a token travel in the body, never in the path',
+      () async {
+    final seen = <http.Request>[];
+    final client = MockClient((request) async {
+      seen.add(request);
+      if (request.url.path.endsWith('/v1/pairings/redeem')) {
+        return _ok(jsonEncode({
+          'credential_id': 'cred-2',
+          'household_id': 'pilot-home',
+          'role': 'member',
+          'actor_id': 'ivan',
+          'token': 'issued-token-value',
+        }));
+      }
+      return _ok(
+          jsonEncode({
+            'pairing_id': 'pair-1',
+            'role': 'guest',
+            'actor_id': 'zuzana',
+            'expires_at': '2026-10-01T10:00:00Z',
+            'code': 'PAIR-CODE-VALUE',
+          }),
+          201);
+    });
+    final api = GenesisApi(
+      baseUrl: Uri.parse('http://green.local:8765'),
+      client: client,
+    );
+    final pairing = await api.createPairing(
+      ownerToken: 'owner-token-value',
+      householdId: 'pilot-home',
+      role: 'guest',
+      actorId: 'zuzana',
+    );
+    expect(pairing.code, 'PAIR-CODE-VALUE');
+    expect(pairing.role, 'guest');
+    expect(pairing.expiresAt, DateTime.utc(2026, 10, 1, 10));
+
+    final issued = await api.redeemPairing(
+      householdId: 'pilot-home',
+      code: 'PAIR-CODE-VALUE',
+    );
+    expect(issued.token, 'issued-token-value');
+
+    for (final request in seen) {
+      final url = request.url.toString();
+      expect(url, isNot(contains('PAIR-CODE-VALUE')));
+      expect(url, isNot(contains('owner-token-value')));
+      expect(url, isNot(contains('issued-token-value')));
+    }
+    // Vlastníkov token ide v hlavičke; kód uplatnenia žiadny token nepotrebuje,
+    // pretože kód sám je oprávnenie.
+    expect(seen.first.headers['Authorization'], 'Bearer owner-token-value');
+    expect(seen.last.headers.containsKey('Authorization'), isFalse);
+  });
+
+  test('a credential view says whether it was used and whether it was revoked',
+      () {
+    final unused = GenesisCredential.fromJson({
+      'credential_id': 'cred-1',
+      'household_id': 'pilot-home',
+      'role': 'member',
+      'actor_id': 'ivan',
+      'issued_at': '2026-10-01T08:00:00Z',
+      'last_used_at': null,
+      'revoked_at': null,
+      'revoked_by': null,
+    });
+    expect(unused.isUnused, isTrue);
+    expect(unused.isRevoked, isFalse);
+
+    final revoked = GenesisCredential.fromJson({
+      'credential_id': 'cred-1',
+      'household_id': 'pilot-home',
+      'role': 'member',
+      'actor_id': 'ivan',
+      'issued_at': '2026-10-01T08:00:00Z',
+      'last_used_at': '2026-10-01T08:30:00Z',
+      'revoked_at': '2026-10-01T09:10:00Z',
+      'revoked_by': 'pilot-owner',
+    });
+    expect(revoked.isRevoked, isTrue);
+    expect(revoked.isUnused, isFalse);
+    expect(revoked.revokedBy, 'pilot-owner');
+  });
+
   test('API paths stay under the Home Assistant ingress prefix', () async {
     final paths = <String>[];
     final client = MockClient((request) async {

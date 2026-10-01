@@ -110,7 +110,7 @@ void main() {
       findsOneWidget,
     );
 
-    await tester.enterText(find.byType(TextField).at(1), 'a' * 32);
+    await tester.enterText(find.widgetWithText(TextField, 'Prístupový token'), 'a' * 32);
     await tester.pump(const Duration(seconds: 15));
     await _settle(tester);
 
