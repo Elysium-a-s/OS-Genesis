@@ -39,6 +39,33 @@ Tlačidlo je deaktivované, keď by zosúladenie nemalo čo robiť. `GenesisGran
 
 Stav sa po stlačení prekreslí z odpovede, nie z domnienky o tom, čo stlačenie spôsobilo.
 
+## Hlasový povel a potvrdenie citlivej akcie
+
+Sekcia **Hlasový povel** posiela prepis na `POST /v1/voice/commands` a potvrdzuje citlivú akciu cez `POST /v1/voice/confirmations`. Backend tok je z ELYSIUM-345 a 346; panel k nemu dáva rozhranie.
+
+**Mikrofón v paneli nie je a nepredstiera sa.** Panel neberie zvuk, takže žiadne surové audio nevzniká a nie je čo ukladať. Rozpoznávanie reči cez Home Assistant Assist alebo iný výslovný adaptér je samostatný krok — tento tiket dáva bezpečnú textovú cestu k tomu istému intentu, a ten je pre pilot dôležitejší: prepis prejde tou istou cestou ako hlas, takže sa dá overiť rozhodovanie bez toho, aby niekto musel riešiť mikrofón.
+
+**Štyri výsledky a ani jeden nie je chyba klienta.** Jednotka vracia nejednoznačný aj zamietnutý povel s HTTP 422, čo je stále odpoveď o domácnosti, nie porucha. Klient to preto nerieši ako výnimku a telo číta pri 200, 202 aj 422 — keby 422 vyhodilo chybu, panel by nemal čo povedať práve tam, kde človek potrebuje dôvod.
+
+| výsledok | HTTP | čo to znamená |
+| --- | --- | --- |
+| `executed` | 200 | povel je v ledgeri; stav zariadenia platí podľa sekcie Zariadenia |
+| `confirmation_required` | 202 | **nič sa nevykonalo**, čaká sa na výslovné potvrdenie |
+| `unclear` | 422 | jednotka povel nepochopila, takže nevykonala nič |
+| `refused` | 422 | zamietnuté z dôvodu, ktorý nesúvisí s porozumením |
+
+`unclear` a `refused` sa zámerne nezlievajú do „nepodarilo sa". Nevykonané z opatrnosti a nevykonané pre nepochopenie sú pre človeka dve rôzne veci: prvé treba potvrdiť, druhé preformulovať. Stav, ktorý panel nepozná, sa nikdy nezobrazí ako úspech.
+
+**Nejednoznačný povel panel nedohadne.** Keď jednotka vráti kandidátov, panel ich vypíše — povedať, medzi čím sa nerozhodla, je poctivejšie než si vybrať. Text zostane v poli, aby sa dal upraviť; odoslať to isté znova by nepomohlo.
+
+**Citlivá akcia sa nevykoná na prvé slovo.** Panel napíše, že sa nič nestalo a zariadenie sa nepohlo, ukáže, dokedy potvrdenie platí, a až tlačidlo **Potvrdiť akciu** akciu vykoná. Identifikátor potvrdenia je jednorazové oprávnenie, takže ide v tele požiadavky, nikdy v adrese — to isté pravidlo ako pri párovacom kóde. Testy to tvrdia explicitne.
+
+**Súhlas s uložením prepisu je vypnutý.** Prepis je obsah toho, čo niekto povedal vo svojej domácnosti; bez súhlasu si jednotka nechá iba intent a rozhodnutie. Audit funguje aj tak, pretože dokladá rozhodnutie, nie obsah — a prepis v ňom nie je ani vtedy, keď bol uložený.
+
+**Identitu aktéra určuje jednotka podľa tokenu, nie panel.** Panel ju píše pod poľom, pretože práve to meno pôjde do auditu. Hlas nedáva viac práv než panel: ovládať smie vlastník a člen, nie hosť ani služba — hosťovi sa tlačidlo nezobrazí, lebo jednotka by mu odpovedala 403.
+
+**Audit hlasu** ukazuje posledné rozhodnutia z `GET /v1/voice/audit`: čo sa rozhodlo, kým a prečo. Čakanie na potvrdenie je samo rozhodnutím a je v ňom tiež, aj keď sa nič nevykonalo.
+
 ## Prístup: párovanie a odobranie
 
 Vlastník vydá párovací kód cez `POST /v1/pairings`, člen ho uplatní cez `POST /v1/pairings/redeem`, vlastník vidí vydané identity na `GET /v1/credentials` a prístup odoberie cez `DELETE /v1/credentials/{id}`. Backend tok je z ELYSIUM-347; panel k nemu dáva rozhranie.

@@ -129,6 +129,7 @@ MockClient _unit({
             authorization.contains(_ownerToken) ? 'owner' : 'member'));
       }
       if (path.endsWith('/v1/inventory')) return _ok(_inventory());
+      if (path.endsWith('/v1/voice/audit')) return _ok('[]', 200);
       if (path.endsWith('/v1/access')) return _ok(grants, grantsStatus);
       if (path.endsWith('/v1/diagnostics')) return _ok(_diagnostics());
       if (path.endsWith('/v1/credentials')) return _ok('[]');
