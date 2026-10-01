@@ -84,6 +84,28 @@ Relock nespúšťa HTTP požiadavka. Ak sú nastavené HA premenné, core spust�
 
 Prehľad je na `GET /v1/access` s ktorýmkoľvek platným tokenom. Vracia stav grantu, `required_confirmation`, počet uzatváracích pokusov, posledný potvrdený stav (povel, hodnota, úroveň potvrdenia a čas dôkazu) a otvorené incidenty; odpoveď je ohraničená na 200 grantov domácnosti.
 
+### Vyžiadané zosúladenie jedného grantu
+
+`POST /v1/access/{decision_id}/reconcile` spustí jeden prechod nad jedným grantom. Je to pre človeka, ktorý vidí otvorený incident a nechce čakať na ďalší periodický prechod. Smie to **iba vlastník** — nie preto, že by to bolo nebezpečné, ale preto, že je to zásah do fyzického sveta domácnosti a audit má povedať kto. Člen, hosť aj služba dostanú 403, a rola sa kontroluje skôr než čokoľvek iné: bez nastaveného Home Assistanta dostane vlastník 503, ale člen stále len 403, takže z odpovede nezistí ani to, či je prepojenie nastavené.
+
+Volanie ide tou istou cestou ako periodický prechod, len s jedným grantom — zámerne, aby nedokázalo nič, čo plánované zosúladenie nerobí:
+
+* **Posiela sa výlučne uzatváracia hodnota.** Prístup sa týmto nedá otvoriť ani predĺžiť.
+* **Platné okno sa neskracuje.** Grant, ktorý by periodický prechod ešte nevybral, vráti `not_due` a nič sa nepohne. Zatvoriť prístup pred expiráciou nie je zosúladenie — je to odobranie prístupu a to má vlastné rozhodnutie `revert`, vlastný audit a vlastnú autorizáciu.
+* **Limit pokusov ani backoff sa neobchádza.** Opakované volanie skončí na tej istej podmienke ako prechod a vráti `unchanged`; zariadenie sa tým zaplaviť nedá.
+
+Odpoveď je `{"outcome": …, "access": …}`, kde `access` má ten istý tvar ako jeden prvok `GET /v1/access`. `outcome` je jedno z:
+
+| `outcome` | čo to znamená |
+| --- | --- |
+| `settled` | Grant dosiahol koncový stav: prístup je dokázateľne zatvorený. |
+| `attempted` | Uzavretie je zapísané, ale vyžadované potvrdenie nedošlo. Grant zostáva `relock_pending` a incident otvorený. |
+| `unchanged` | Nič sa nepohlo: zariadenie je nedostupné, čaká sa na ďalší pokus alebo je limit vyčerpaný. |
+| `not_due` | Okno grantu ešte platí. |
+| `not_open` | Grant už nie je otvorený, takže nie je čo zosúlaďovať. |
+
+`settled` a `attempted` sa zámerne nezlievajú do jedného „uspelo": prvé hovorí o fyzickom svete, druhé iba o tom, že sa Genesis pokúsil. Neznámy `decision_id` je 404.
+
 ### Bezpečnostné výnimky
 
 1. Zosúladenie posiela iba opak hodnoty, ktorú grant otvoril. Nikdy neodomyká — na odomknutie treba nové rozhodnutie `apply`.
@@ -93,8 +115,9 @@ Prehľad je na `GET /v1/access` s ktorýmkoľvek platným tokenom. Vracia stav g
 5. Pokusy sú ohraničené. Genesis zariadenie nebombarduje; nezosúladený stav je vec človeka, nie ďalšieho pokusu.
 6. Pozorovanie z inventára sa prijíma ako dôkaz zariadenia, hoci nie je korelované s konkrétnym povelom: dokazuje fyzický stav, nie to, ktorý povel ho spôsobil. V audite to drží referencia `inventory:<čas>`. Povel, ktorý sa pri tom neodoslal, prechádza cez `unknown` s dôvodom `not_sent_device_already_in_the_closing_value`, pretože `sent` by bola lož.
 7. Revert smie prístup iba zatvoriť. Rozhodnutie, ktoré by obnovilo hodnotu otvorenú grantom, sa odmietne.
-8. Reštart nikdy nepovažuje prerušený povel za úspešný.
+8. Reštart nikdy nepovažuje prerušený povel za úspešný. Vyžiadané zosúladenie grantu bez zapísaného výsledku najprv zavolá `grant::resume`, takže sa nezatvára stav, o ktorom ešte nevieme, ako skončil.
 9. Relock pri expirácii a zosúladenie vydáva aktér `genesis-core`, nie `behavior-engine`; withdraw nesie vydavateľa rozhodnutia. Audit má ukázať, kto povel skutočne vydal.
+10. Vyžiadané zosúladenie smie iba vlastník, nekrátí platné okno a neobchádza limit pokusov. Je to tá istá cesta ako periodický prechod, len nad jedným grantom.
 
 ### Limity
 

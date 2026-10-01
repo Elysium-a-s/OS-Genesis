@@ -427,4 +427,150 @@ void main() {
     // Chýbajúce miestnosti sú priznané, nie vydávané za prázdnu domácnosť.
     expect(inventory.roomsIncomplete, true);
   });
+  /// `isReconcilable` v paneli musí povedať to isté ako `grant::is_reconcilable`
+  /// na jednotke. Keby sa rozišli, tlačidlo by buď vyzeralo rozbito (jednotka
+  /// vráti `not_due`), alebo by chýbalo tam, kde sa dalo použiť.
+  test('the panel agrees with the unit on what can be reconciled', () {
+    final now = DateTime.utc(2026, 10, 1, 19, 30);
+    GenesisGrant grantIn(String state, DateTime expiresAt) =>
+        GenesisGrant.fromJson({
+          'grant': {
+            'decision_id': 'ff77bdb0-70af-4f2a-a913-76609b66761b',
+            'household_id': 'pilot-home',
+            'device_id': 'ha:light.living',
+            'capability_id': 'power',
+            'granted_value': true,
+            'expires_at': expiresAt.toIso8601String(),
+            'state': state,
+            'unlock_confirmed': true,
+            'unlock_command_id': 'behavior:ff77bdb0',
+            'relock_command_id': null,
+            'updated_at': '2026-10-01T19:00:00.000Z',
+          },
+          'required_confirmation': 'device',
+          'close_attempts': 0,
+          'last_confirmed': null,
+          'open_incidents': const [],
+        });
+
+    final later = now.add(const Duration(hours: 1));
+    final earlier = now.subtract(const Duration(hours: 1));
+
+    expect(grantIn('granted', later).isReconcilable(now), true);
+    expect(grantIn('relock_pending', later).isReconcilable(now), true);
+    // Otvorené okno sa tlačidlom neskracuje.
+    expect(grantIn('active', later).isReconcilable(now), false);
+    expect(grantIn('active', earlier).isReconcilable(now), true);
+    // Hranica: okno končí presne teraz, rovnako ako to vidí `due` na jednotke.
+    expect(grantIn('active', now).isReconcilable(now), true);
+    for (final closed in ['relocked', 'unlock_failed', 'superseded']) {
+      expect(grantIn(closed, earlier).isReconcilable(now), false);
+      expect(grantIn(closed, earlier).isOpen, false);
+    }
+    for (final open in ['granted', 'active', 'relock_pending']) {
+      expect(grantIn(open, later).isOpen, true);
+    }
+  });
+
+  /// Potvrdenie poskytovateľom a potvrdenie zariadením sú dve rôzne tvrdenia a
+  /// typ ich nezlieva. Iba druhé hovorí o fyzickom svete.
+  test('a provider acknowledgement is not a device confirmation', () {
+    final provider = GenesisConfirmedState.fromJson({
+      'command_id': 'relock-ff77bdb0',
+      'value': false,
+      'confirmation': 'provider',
+      'at': '2026-10-01T19:35:00.000Z',
+      'observed_at': null,
+    });
+    expect(provider.isDeviceConfirmed, false);
+    expect(provider.observedAt, isNull);
+
+    final device = GenesisConfirmedState.fromJson({
+      'command_id': 'relock-ff77bdb0',
+      'value': false,
+      'confirmation': 'device',
+      'at': '2026-10-01T19:35:00.000Z',
+      'observed_at': '2026-10-01T19:34:30.500Z',
+    });
+    expect(device.isDeviceConfirmed, true);
+    expect(device.observedAt, isNotNull);
+
+    final incident = GenesisIncident.fromJson({
+      'incident_id': 'inc-1',
+      'decision_id': 'ff77bdb0-70af-4f2a-a913-76609b66761b',
+      'kind': 'relock_uncertain',
+      'detail': 'the relock ended as unknown',
+      'at': '2026-10-01T19:35:00.000Z',
+      'resolved_at': null,
+    });
+    expect(incident.isOpen, true);
+  });
+
+  /// Zosúladenie je POST a token zostáva v hlavičke. Identifikátor rozhodnutia
+  /// tajomstvo nie je, takže v ceste byť môže — a je tam zakódovaný.
+  test('requesting reconciliation keeps the token out of the URL', () async {
+    final seen = <http.BaseRequest>[];
+    final client = MockClient((request) async {
+      seen.add(request);
+      return _ok(
+          jsonEncode({
+            'outcome': 'not_due',
+            'access': {
+              'grant': {
+                'decision_id': 'ff77bdb0-70af-4f2a-a913-76609b66761b',
+                'household_id': 'pilot-home',
+                'device_id': 'ha:light.living',
+                'capability_id': 'power',
+                'granted_value': true,
+                'expires_at': '2026-10-02T19:00:00.000Z',
+                'state': 'active',
+                'unlock_confirmed': true,
+                'unlock_command_id': 'behavior:ff77bdb0',
+                'relock_command_id': null,
+                'updated_at': '2026-10-01T19:00:00.000Z',
+              },
+              'required_confirmation': 'device',
+              'close_attempts': 0,
+              'last_confirmed': null,
+              'open_incidents': [],
+            },
+          }),
+          200);
+    });
+    final api = GenesisApi(
+      baseUrl: Uri.parse('http://green.local:8765'),
+      client: client,
+    );
+    const token = 'owner-token-of-at-least-32-characters';
+    final receipt = await api.reconcileAccess(
+      ownerToken: token,
+      decisionId: 'ff77bdb0-70af-4f2a-a913-76609b66761b',
+    );
+    expect(receipt.outcome, 'not_due');
+    expect(receipt.grant.state, 'active');
+    expect(seen.single.method, 'POST');
+    expect(
+      seen.single.url.path,
+      '/v1/access/ff77bdb0-70af-4f2a-a913-76609b66761b/reconcile',
+    );
+    expect(seen.single.url.toString(), isNot(contains(token)));
+    expect(seen.single.headers['Authorization'], 'Bearer $token');
+  });
+
+  /// Odmietnutý token má vlastný typ aj na tejto ceste, takže sa nerieši ako
+  /// chyba siete a panel ho zahodí namiesto opakovania.
+  test('a refused reconciliation is a refusal, not a glitch', () async {
+    final api = GenesisApi(
+      baseUrl: Uri.parse('http://green.local:8765'),
+      client: MockClient((request) async => _ok('{}', 403)),
+    );
+    await expectLater(
+      api.reconcileAccess(ownerToken: 'm' * 32, decisionId: 'abc'),
+      throwsA(isA<GenesisUnauthorized>()),
+    );
+    await expectLater(
+      api.access('m' * 32),
+      throwsA(isA<GenesisUnauthorized>()),
+    );
+  });
 }

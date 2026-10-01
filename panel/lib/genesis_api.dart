@@ -390,6 +390,177 @@ class GenesisCredential {
   bool get isUnused => lastUsedAt == null;
 }
 
+/// Jeden incident, ktorý Genesis o grante založil.
+///
+/// Otvorený incident nemá `resolvedAt`. Je to jediný údaj, ktorý hovorí „toto
+/// nedopadlo a nikto to nepotvrdil" — preto sa nezlieva so stavom grantu.
+class GenesisIncident {
+  const GenesisIncident({
+    required this.incidentId,
+    required this.kind,
+    required this.detail,
+    required this.at,
+    required this.resolvedAt,
+  });
+
+  final String incidentId;
+  final String kind;
+  final String detail;
+  final DateTime? at;
+  final DateTime? resolvedAt;
+
+  factory GenesisIncident.fromJson(Map<String, dynamic> json) =>
+      GenesisIncident(
+        incidentId: json['incident_id'] as String,
+        kind: json['kind'] as String,
+        detail: json['detail'] as String,
+        at: DateTime.tryParse(json['at'] as String? ?? ''),
+        resolvedAt: DateTime.tryParse(json['resolved_at'] as String? ?? ''),
+      );
+
+  bool get isOpen => resolvedAt == null;
+}
+
+/// Posledný stav zariadenia, ktorý Genesis skutočne potvrdil dôkazom.
+///
+/// Toto je fyzický svet. Stav grantu je logická evidencia a tie dve veci sa
+/// môžu rozchádzať — práve kvôli tomu je tu samostatný typ.
+class GenesisConfirmedState {
+  const GenesisConfirmedState({
+    required this.commandId,
+    required this.value,
+    required this.confirmation,
+    required this.at,
+    required this.observedAt,
+  });
+
+  final String commandId;
+
+  /// Hodnota, ktorú dôkaz potvrdil. Pri schopnosti `power` je to `bool`.
+  final Object? value;
+
+  /// `provider` alebo `device`. Iba druhé hovorí o fyzickom svete.
+  final String confirmation;
+  final DateTime? at;
+  final DateTime? observedAt;
+
+  factory GenesisConfirmedState.fromJson(Map<String, dynamic> json) =>
+      GenesisConfirmedState(
+        commandId: json['command_id'] as String,
+        value: json['value'],
+        confirmation: json['confirmation'] as String,
+        at: DateTime.tryParse(json['at'] as String? ?? ''),
+        observedAt: DateTime.tryParse(json['observed_at'] as String? ?? ''),
+      );
+
+  bool get isDeviceConfirmed => confirmation == 'device';
+}
+
+/// Časový prístup: jeden grant a všetko, čo o ňom Genesis vie.
+class GenesisGrant {
+  const GenesisGrant({
+    required this.decisionId,
+    required this.deviceId,
+    required this.capabilityId,
+    required this.grantedValue,
+    required this.expiresAt,
+    required this.state,
+    required this.unlockConfirmed,
+    required this.updatedAt,
+    required this.requiredConfirmation,
+    required this.closeAttempts,
+    required this.lastConfirmed,
+    required this.openIncidents,
+  });
+
+  /// Identifikátor rozhodnutia, ktoré prístup otvorilo. Je to zároveň kľúč,
+  /// ktorým sa dá vyžiadať zosúladenie.
+  final String decisionId;
+  final String deviceId;
+  final String capabilityId;
+
+  /// Hodnota, na ktorú bol prístup otvorený. Zatvára sa jej opakom.
+  final bool grantedValue;
+  final DateTime? expiresAt;
+
+  /// `granted`, `active`, `unlock_failed`, `relocked`, `relock_pending` alebo
+  /// `superseded`. Je to logický stav evidencie, nie stav zariadenia.
+  final String state;
+
+  /// Nepravda znamená, že unlock nedosiahol vyžadovanú úroveň potvrdenia.
+  final bool unlockConfirmed;
+  final DateTime? updatedAt;
+
+  /// Čo rozhodnutie vyžadovalo ako dôkaz: `provider` alebo `device`.
+  final String requiredConfirmation;
+  final int closeAttempts;
+  final GenesisConfirmedState? lastConfirmed;
+  final List<GenesisIncident> openIncidents;
+
+  factory GenesisGrant.fromJson(Map<String, dynamic> json) {
+    final grant = json['grant'] as Map<String, dynamic>;
+    final confirmed = json['last_confirmed'] as Map<String, dynamic>?;
+    return GenesisGrant(
+      decisionId: grant['decision_id'] as String,
+      deviceId: grant['device_id'] as String,
+      capabilityId: grant['capability_id'] as String,
+      grantedValue: grant['granted_value'] as bool,
+      expiresAt: DateTime.tryParse(grant['expires_at'] as String? ?? ''),
+      state: grant['state'] as String,
+      unlockConfirmed: grant['unlock_confirmed'] as bool? ?? false,
+      updatedAt: DateTime.tryParse(grant['updated_at'] as String? ?? ''),
+      requiredConfirmation: json['required_confirmation'] as String,
+      closeAttempts: json['close_attempts'] as int? ?? 0,
+      lastConfirmed: confirmed == null
+          ? null
+          : GenesisConfirmedState.fromJson(confirmed),
+      openIncidents: ((json['open_incidents'] as List<dynamic>?) ?? const [])
+          .map((item) => GenesisIncident.fromJson(item as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+
+  /// Stavy, v ktorých môže byť zariadenie stále otvorené. Zhoduje sa s
+  /// `GrantState::is_open` na jednotke.
+  bool get isOpen =>
+      state == 'granted' || state == 'active' || state == 'relock_pending';
+
+  /// Relock skončil neisto a stav čaká na zosúladenie.
+  bool get isRelockPending => state == 'relock_pending';
+
+  /// Okno uplynulo. Panel to počíta sám, pretože jednotka vracia čas, nie
+  /// príznak — a čas sa dá prekresliť bez ďalšieho dotazu.
+  bool expiredAt(DateTime now) =>
+      expiresAt != null && !expiresAt!.isAfter(now);
+
+  /// Či by zosúladenie vôbec malo čo robiť. Zhoduje sa s `grant::is_reconcilable`
+  /// na jednotke; panel podľa toho tlačidlo deaktivuje, nech nevyzerá, že
+  /// nefunguje.
+  bool isReconcilable(DateTime now) {
+    if (state == 'granted' || state == 'relock_pending') return true;
+    if (state == 'active') return expiredAt(now);
+    return false;
+  }
+}
+
+/// Čo urobilo vyžiadané zosúladenie, aj s tým, čo o grante vieme potom.
+class GenesisReconcileReceipt {
+  const GenesisReconcileReceipt({required this.outcome, required this.grant});
+
+  /// `settled`, `attempted`, `unchanged`, `not_open` alebo `not_due`.
+  ///
+  /// `settled` a `attempted` sa zámerne nezlievajú: prvé znamená dokázateľne
+  /// zatvorený prístup, druhé že sa o to Genesis pokúsil a dôkaz nemá.
+  final String outcome;
+  final GenesisGrant grant;
+
+  factory GenesisReconcileReceipt.fromJson(Map<String, dynamic> json) =>
+      GenesisReconcileReceipt(
+        outcome: json['outcome'] as String,
+        grant: GenesisGrant.fromJson(json['access'] as Map<String, dynamic>),
+      );
+}
+
 class GenesisApi {
   GenesisApi({required this.baseUrl, http.Client? client})
       : _client = client ?? http.Client(),
@@ -582,6 +753,46 @@ class GenesisApi {
     if (response.statusCode != 204) {
       throw StateError('Genesis revocation HTTP ${response.statusCode}');
     }
+  }
+
+  /// Aktívne a nedovrené časové prístupy domácnosti.
+  ///
+  /// Čítať to smie každá rola, ktorá má token: kto v domácnosti žije, má vedieť,
+  /// že sa mu niečo zamyká samo.
+  Future<List<GenesisGrant>> access(String accessToken) async {
+    final response = await _client.get(
+      _path('v1/access'),
+      headers: {'Authorization': 'Bearer $accessToken'},
+    ).timeout(const Duration(seconds: 5));
+    _refuseIfUnauthorized(response, 'access');
+    if (response.statusCode != 200) {
+      throw StateError('Genesis access HTTP ${response.statusCode}');
+    }
+    return _asList(response)
+        .map((item) => GenesisGrant.fromJson(item as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Vyžiada jeden prechod zosúladenia nad jedným grantom.
+  ///
+  /// Jednotka týmto nedokáže nič otvoriť ani predĺžiť — posiela výlučne
+  /// uzatváraciu hodnotu — a platné okno neskráti. Dlhší časový limit než pri
+  /// čítaní je preto, že za tým môže byť skutočný povel na zariadenie.
+  ///
+  /// Identifikátor rozhodnutia nie je tajomstvo, takže v ceste byť môže.
+  Future<GenesisReconcileReceipt> reconcileAccess({
+    required String ownerToken,
+    required String decisionId,
+  }) async {
+    final response = await _client.post(
+      _path('v1/access/${Uri.encodeComponent(decisionId)}/reconcile'),
+      headers: {'Authorization': 'Bearer $ownerToken'},
+    ).timeout(const Duration(seconds: 15));
+    _refuseIfUnauthorized(response, 'reconciliation');
+    if (response.statusCode != 200) {
+      throw StateError('Genesis reconciliation HTTP ${response.statusCode}');
+    }
+    return GenesisReconcileReceipt.fromJson(_asObject(response));
   }
 
   void close() {

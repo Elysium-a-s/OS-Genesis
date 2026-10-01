@@ -246,6 +246,10 @@ fn app(state: AppState) -> Router {
             axum::routing::post(behavior_decision),
         )
         .route("/v1/access", get(access))
+        .route(
+            "/v1/access/{decision_id}/reconcile",
+            axum::routing::post(reconcile_access),
+        )
         .route("/v1/voice/commands", axum::routing::post(voice_command))
         .route(
             "/v1/voice/confirmations",
@@ -532,6 +536,70 @@ async fn access(
             tracing::error!(%error, "reading the timed access overview failed");
             StatusCode::INTERNAL_SERVER_ERROR
         })
+}
+
+/// Identifikátor rozhodnutia je v kontrakte UUID; dlhší vstup netreba ani čítať.
+const MAX_DECISION_ID: usize = 64;
+
+/// Čo vyžiadané zosúladenie urobilo, aj s tým, čo o grante vieme potom.
+#[derive(Serialize)]
+struct ReconcileReceipt {
+    outcome: ha_command::ReconcileOutcome,
+    /// Stav grantu po prechode. Panel ho prekreslí z tohto, nie z domnienky o
+    /// tom, čo stlačenie spôsobilo.
+    access: AccessState,
+}
+
+/// Vyžiada jeden prechod zosúladenia nad jedným grantom.
+///
+/// Toto je tlačidlo pre človeka, ktorý vidí otvorený incident a nechce čakať na
+/// ďalší periodický prechod. Zámerne nerobí nič, čo by periodický prechod
+/// neurobil sám: posiela výlučne uzatváraciu hodnotu, nekrátí platné okno a
+/// nepreskakuje limit pokusov. Nedá sa ním teda nič otvoriť a nie je to ani
+/// náhrada za odobranie prístupu.
+///
+/// Smie to iba vlastník. Nie preto, že by to bolo nebezpečné, ale preto, že je
+/// to zásah do fyzického sveta domácnosti a audit má povedať kto.
+async fn reconcile_access(
+    State(state): State<AppState>,
+    Path(decision_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<ReconcileReceipt>, StatusCode> {
+    household_owner(&headers, &state).await?;
+    if decision_id.len() > MAX_DECISION_ID {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let ha_config = state
+        .ha_config
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let mut ledger = state.ledger.lock().await;
+    let outcome = ha_command::reconcile_grant(
+        ha_config,
+        &state.inventory,
+        &mut ledger,
+        &decision_id,
+        Utc::now(),
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "the requested reconciliation failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .ok_or(StatusCode::NOT_FOUND)?;
+    let access = grant::access_state(&ledger, &decision_id)
+        .map_err(|error| {
+            tracing::error!(%error, "reading the grant after reconciliation failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    tracing::info!(
+        decision_id = %decision_id,
+        outcome = ?outcome,
+        state = ?access.grant.state,
+        "reconciliation requested by the owner"
+    );
+    Ok(Json(ReconcileReceipt { outcome, access }))
 }
 
 async fn create_command(
@@ -1674,6 +1742,122 @@ mod tests {
         assert_eq!(overview[0]["close_attempts"], 0);
         assert!(overview[0]["last_confirmed"].is_null());
         assert_eq!(overview[0]["open_incidents"], serde_json::json!([]));
+    }
+
+    /// Vyžiadané zosúladenie je zásah do fyzického sveta domácnosti, takže
+    /// rola sa kontroluje skôr než čokoľvek iné — aj skôr než to, či je vôbec
+    /// Home Assistant nastavený. Člen nesmie z odpovede zistiť ani to.
+    #[tokio::test]
+    async fn requested_reconciliation_is_the_owners_and_nobody_elses() {
+        let mut state = test_state(Some("r".repeat(32)));
+        state.write_token = Some("o".repeat(32));
+        state.member_token = Some("m".repeat(32));
+        state.guest_token = Some("g".repeat(32));
+        let decision_id = seed_grant(&state).await;
+        let path = format!("/v1/access/{decision_id}/reconcile");
+
+        let (status, _) = call(state.clone(), "POST", &path, None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        for token in ["m".repeat(32), "g".repeat(32), "r".repeat(32)] {
+            let (status, _) = call(state.clone(), "POST", &path, Some(&token), None).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "token {token} got through");
+        }
+
+        // Vlastník prejde autorizáciou a narazí až na to, že jednotka nemá
+        // prepojenie na Home Assistanta. Bez neho sa fyzický stav zosúladiť
+        // nedá a 503 je o tom pravda — nie 500 a nie predstieraný úspech.
+        let (status, _) = call(state, "POST", &path, Some(&"o".repeat(32)), None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn requested_reconciliation_of_an_unknown_grant_is_not_found() {
+        let mut state = test_state(Some("r".repeat(32)));
+        state.write_token = Some("o".repeat(32));
+        state.ha_config = Some(HaConfig {
+            websocket_url: "ws://127.0.0.1:1/api/websocket".to_owned(),
+            token: "unused".to_owned(),
+        });
+
+        let (status, _) = call(
+            state.clone(),
+            "POST",
+            "/v1/access/3f5a8c1e-0000-4000-8000-000000000000/reconcile",
+            Some(&"o".repeat(32)),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Neúnosne dlhý identifikátor sa nečíta a do ledgeru sa nedostane.
+        let (status, _) = call(
+            state,
+            "POST",
+            &format!("/v1/access/{}/reconcile", "a".repeat(MAX_DECISION_ID + 1)),
+            Some(&"o".repeat(32)),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// Grant, ktorého okno ešte platí, sa tlačidlom nedá zavrieť. Odpoveď to
+    /// povie (`not_due`) a nesie stav, z ktorého panel prekreslí, čo naozaj je.
+    #[tokio::test]
+    async fn requested_reconciliation_does_not_shorten_a_valid_window() {
+        let mut state = test_state(Some("r".repeat(32)));
+        state.write_token = Some("o".repeat(32));
+        state.ha_config = Some(HaConfig {
+            websocket_url: "ws://127.0.0.1:1/api/websocket".to_owned(),
+            token: "unused".to_owned(),
+        });
+        let decision_id = seed_future_grant(&state).await;
+
+        let (status, body) = call(
+            state,
+            "POST",
+            &format!("/v1/access/{decision_id}/reconcile"),
+            Some(&"o".repeat(32)),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["outcome"], "not_due");
+        assert_eq!(body["access"]["grant"]["decision_id"], decision_id);
+        assert_eq!(body["access"]["close_attempts"], 0);
+    }
+
+    /// Grant s oknom, ktoré v čase testu ešte neskončilo. `seed_grant` má
+    /// pevné dátumy v minulosti, takže na „ešte platí" treba vlastný.
+    async fn seed_future_grant(state: &AppState) -> String {
+        let now = Utc::now();
+        let decision = BehaviorDecision::parse(
+            &serde_json::json!({
+                "schema_version": "1.0",
+                "decision_id": "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
+                "issuer": "behavior-engine",
+                "household_id": "pilot-home",
+                "central_unit_id": "ad19a578-21e2-453f-a57c-1913350be34e",
+                "subject_id": "64582f6b-38a5-48dd-9ed4-ae02949c7740",
+                "device_id": "ha:light.living",
+                "capability_id": "power",
+                "requested_value": true,
+                "operation": "apply",
+                "valid_from": now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "expires_at": (now + chrono::TimeDelta::hours(2))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "reason_code": "goal_verified",
+                "idempotency_key": "behavior:7c1d2e3f",
+                "required_confirmation": "device"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut ledger = state.ledger.lock().await;
+        grant::open(&mut ledger, &decision, now)
+            .unwrap()
+            .decision_id
     }
 
     fn spoken_body(household_id: &str, transcript: &str) -> String {

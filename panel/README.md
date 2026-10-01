@@ -10,6 +10,35 @@ Výber sa viaže na `area_id`, ktoré sa pri premenovaní miestnosti nemení. Ke
 
 Prázdny zoznam má tri rôzne príčiny a panel ich nezlieva: ešte sa nepozeral, pozrel sa a domácnosť je naozaj prázdna, alebo sa pozrieť nedá. Posledné dve vyzerajú v odpovedi rovnako, preto inventár nesie so sebou stav prepojenia. Keď sa register miestností nepodarilo prečítať celý (vyžaduje administrátorský token Home Assistanta), panel to napíše a zariadenia ukáže všetky.
 
+## Časový prístup: granty, incidenty a relock
+
+Sekcia **Časový prístup** číta `GET /v1/access` a stojí na jedinom rozlíšení: **evidencia na jednotke nie je stav zariadenia.** Grant môže byť `relocked` a žiarovka svietiť; môže byť `relock_pending` a byť dávno zhasnutá. Preto má každý grant dva samostatné riadky a panel ich nikdy nezlieva do jednej vety:
+
+| riadok | čo hovorí |
+| --- | --- |
+| **Evidencia jednotky** | logický stav grantu a okno platnosti — čo si jednotka pamätá |
+| **Fyzické potvrdenie** | posledný dôkaz, alebo priznanie, že žiadny nie je |
+
+`provider` a `device` sa v druhom riadku nezlievajú. Potvrdenie poskytovateľom znamená, že potvrdil Home Assistant — o jeden krok ďalej od žiarovky, než sa zdá. Keď rozhodnutie vyžadovalo potvrdenie zariadením a prišlo len od poskytovateľa, panel to dopíše namiesto toho, aby to skryl za „potvrdené".
+
+**Stav, ktorý panel nepozná, sa nikdy nezobrazí ako úspech.** Platí to rovnako ako pri stavoch povelu.
+
+**Prázdny zoznam a neprečítaný zoznam nie sú to isté.** Tu je ten rozdiel najdrahší: „žiadny časový prístup nie je otvorený" by bola nepravda o tom, čo je práve v domácnosti odomknuté. Keď sa prehľad nepodarí prečítať, panel to povie.
+
+**Granty vidí každá rola.** Kto v domácnosti žije, má vedieť, že sa mu niečo zamyká samo.
+
+### Tlačidlo Zosúladiť teraz
+
+Vlastník môže vyžiadať jeden prechod zosúladenia cez `POST /v1/access/{decision_id}/reconcile`, keď vidí otvorený incident a nechce čakať na periodický prechod. Člen a hosť vidia namiesto tlačidla vysvetlenie — jednotka by im odpovedala 403 a tlačidlo, ktoré nefunguje, je horšie než žiadne.
+
+Tlačidlo je deaktivované, keď by zosúladenie nemalo čo robiť. `GenesisGrant.isReconcilable` sa pri tom drží tej istej podmienky ako `grant::is_reconcilable` na jednotke; test to tvrdí stavom po stave aj na hranici expirácie, pretože keby sa tie dve strany rozišli, tlačidlo by buď vyzeralo rozbito, alebo by chýbalo tam, kde sa dalo použiť.
+
+**Platné okno sa tlačidlom neskracuje.** Grant, ktorý ešte platí, vráti `not_due` a panel k tomu napíše prečo: zatvoriť prístup pred expiráciou nie je zosúladenie, je to odobranie prístupu a to má vlastné rozhodnutie. Keby to tlačidlo dokázalo, človek, ktorý si prístup zaslúžil, by o neho prišiel jedným omylom.
+
+**`settled` a `attempted` sa nezlievajú.** Prvé znamená dokázateľne zatvorený prístup, druhé že sa o to Genesis pokúsil a dôkaz nemá — vtedy grant zostáva `relock_pending` a incident otvorený. Zliať ich do jedného „hotovo" by znamenalo tvrdiť o fyzickom svete niečo, čo nikto nepotvrdil.
+
+Stav sa po stlačení prekreslí z odpovede, nie z domnienky o tom, čo stlačenie spôsobilo.
+
 ## Prístup: párovanie a odobranie
 
 Vlastník vydá párovací kód cez `POST /v1/pairings`, člen ho uplatní cez `POST /v1/pairings/redeem`, vlastník vidí vydané identity na `GET /v1/credentials` a prístup odoberie cez `DELETE /v1/credentials/{id}`. Backend tok je z ELYSIUM-347; panel k nemu dáva rozhranie.
