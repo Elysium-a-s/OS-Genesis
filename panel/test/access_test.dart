@@ -215,6 +215,24 @@ void main() {
     expect(jsonDecode((issue as http.Request).body)['role'], 'member');
     expect(jsonDecode(issue.body)['actor_id'], 'zuzana');
 
+    // Kód musí byť čitateľný aj čítačkou obrazovky. SelectableText svoj obsah do
+    // stromu prístupnosti sám nedáva — na rozdiel od Text — a kód sa pritom
+    // ukazuje práve raz. Bez popisu by si ho nevidiaci vlastník nemal ako
+    // prečítať a člena do domácnosti by nepridal.
+    final code = tester.widget<SelectableText>(
+      find.widgetWithText(SelectableText, _pairingCode),
+    );
+    expect(code.semanticsLabel, isNotNull);
+    expect(
+      code.semanticsLabel!.replaceAll(' ', ''),
+      _pairingCode,
+      reason: 'popis pre čítačku musí niesť ten istý kód',
+    );
+    expect(
+      code.semanticsLabel, contains(' '),
+      reason: 'kód sa číta po skupinách, nie ako jeden zhluk znakov',
+    );
+
     await _press(tester, find.text('Mám ho'));
     await _settle(tester);
     expect(find.text(_pairingCode), findsNothing);

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -1839,6 +1840,18 @@ class _GenesisHomeState extends State<GenesisHome> {
     }
   }
 
+  /// Kód po štvoriciach, aby ho čítačka obrazovky nečítala ako jeden zhluk.
+  ///
+  /// Vizuálne zobrazenie zostáva nerozdelené: na obrazovke pomáha `letterSpacing`,
+  /// v reči pomáha pauza, a sú to dve rôzne veci.
+  static String _spellOut(String code) {
+    final groups = <String>[];
+    for (var start = 0; start < code.length; start += 4) {
+      groups.add(code.substring(start, math.min(start + 4, code.length)));
+    }
+    return groups.join(' ');
+  }
+
   /// Vydávanie a odoberanie prístupu.
   Widget _accessSection() {
     final theme = Theme.of(context);
@@ -1916,6 +1929,11 @@ class _GenesisHomeState extends State<GenesisHome> {
           const SizedBox(height: 10),
           SelectableText(
             pairing.code,
+            // Bez `semanticsLabel` sa obsah SelectableText do stromu prístupnosti
+            // nedostane vôbec — na rozdiel od Text. Kód sa pritom zobrazuje práve
+            // raz, takže bez tohto riadku si ho človek s čítačkou obrazovky nemá
+            // ako prečítať a člena do domácnosti nepridá.
+            semanticsLabel: _spellOut(pairing.code),
             style: theme.textTheme.headlineSmall?.copyWith(
               fontFeatures: const [],
               letterSpacing: 2,

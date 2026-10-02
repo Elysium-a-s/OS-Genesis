@@ -38,7 +38,22 @@ jobs:
           flutter pub get
           flutter analyze
           flutter test
-          flutter build web --release
+          flutter build web --release --no-web-resources-cdn
+      - name: Check the panel carries CanvasKit itself
+        working-directory: panel
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Panel kreslí cez CanvasKit. Bez `--no-web-resources-cdn` si ho beh
+          # stiahne z gstatic.com — a domácnosť bez internetu potom nevidí nič,
+          # hoci jednotka aj žiarovka sú na mieste a fungujú. Súbor je v obraze
+          # tak či tak, išlo len o to, odkiaľ sa načíta.
+          test -s build/web/canvaskit/canvaskit.wasm
+          if grep -q 'gstatic.com/flutter-canvaskit' build/web/main.dart.js; then
+            echo "panel by si CanvasKit sťahoval z CDN" >&2
+            exit 1
+          fi
+          grep -q '"useLocalCanvasKit":true' build/web/flutter_bootstrap.js
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       - name: Read the app image and version
